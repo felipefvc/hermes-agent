@@ -65,6 +65,116 @@ _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT = 30.0
 _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT = 5.0
 _TELEGRAM_COMMAND_MENTION_RE = re.compile(r"(?<![\w:/])/([A-Za-z0-9][A-Za-z0-9_-]*)")
 
+_GATEWAY_EVENT_PATCH_FIELDS = {
+    "auto_skill",
+    "channel_context",
+    "channel_prompt",
+}
+
+
+def _patch_gateway_event_from_hook(event: "MessageEvent", result: dict) -> "MessageEvent":
+    """Apply generic pre-dispatch hook patches to a MessageEvent."""
+    if not isinstance(result, dict):
+        return event
+
+    updates: dict[str, Any] = {}
+    for field_name in _GATEWAY_EVENT_PATCH_FIELDS:
+        if field_name in result:
+            updates[field_name] = result.get(field_name)
+
+    if "text" in result and isinstance(result.get("text"), str):
+        updates["text"] = result["text"]
+
+    metadata = dict(getattr(event, "metadata", None) or {})
+    patch_metadata = result.get("metadata")
+    if isinstance(patch_metadata, dict):
+        metadata.update(patch_metadata)
+    if "runtime_overrides" in result:
+        metadata["gateway_runtime_overrides"] = result.get("runtime_overrides") or {}
+    if metadata:
+        updates["metadata"] = metadata
+
+    if not updates:
+        return event
+    return dataclasses.replace(event, **updates)
+
+
+def _apply_gateway_runtime_override(
+    *,
+    model: str,
+    runtime_kwargs: dict,
+    enabled_toolsets: list,
+    disabled_toolsets: Any,
+    reasoning_config: Optional[dict],
+    combined_ephemeral: str,
+    override: dict,
+) -> tuple[str, dict, list, Any, Optional[dict], str]:
+    """Apply a validated gateway runtime override dict."""
+    if not isinstance(override, dict):
+        return (
+            model,
+            runtime_kwargs,
+            enabled_toolsets,
+            disabled_toolsets,
+            reasoning_config,
+            combined_ephemeral,
+        )
+
+    runtime_kwargs = dict(runtime_kwargs or {})
+    if isinstance(override.get("model"), str) and override["model"].strip():
+        model = override["model"].strip()
+
+    runtime_override = override.get("runtime")
+    if isinstance(runtime_override, dict):
+        for key in (
+            "api_key",
+            "base_url",
+            "provider",
+            "api_mode",
+            "command",
+            "credential_pool",
+        ):
+            if key in runtime_override and runtime_override[key] is not None:
+                runtime_kwargs[key] = runtime_override[key]
+        if "args" in runtime_override:
+            args = runtime_override.get("args")
+            runtime_kwargs["args"] = list(args) if isinstance(args, (list, tuple)) else []
+
+    for key in ("provider", "base_url", "api_mode"):
+        if isinstance(override.get(key), str) and override[key].strip():
+            runtime_kwargs[key] = override[key].strip()
+
+    toolsets = override.get("toolsets", override.get("enabled_toolsets"))
+    if isinstance(toolsets, (list, tuple)) and all(isinstance(item, str) for item in toolsets):
+        enabled_toolsets = sorted({item.strip() for item in toolsets if item.strip()})
+
+    disabled = override.get("disabled_toolsets")
+    if isinstance(disabled, (list, tuple)) and all(isinstance(item, str) for item in disabled):
+        disabled_toolsets = sorted({item.strip() for item in disabled if item.strip()}) or None
+
+    reasoning = override.get("reasoning", override.get("reasoning_config"))
+    if isinstance(reasoning, dict):
+        reasoning_config = dict(reasoning)
+    elif isinstance(reasoning, str) and reasoning.strip():
+        from hermes_constants import parse_reasoning_effort
+
+        parsed = parse_reasoning_effort(reasoning.strip())
+        if parsed is not None:
+            reasoning_config = parsed
+
+    prompt = override.get("channel_prompt", override.get("ephemeral_system_prompt"))
+    if isinstance(prompt, str) and prompt.strip():
+        combined_ephemeral = (combined_ephemeral + "\n\n" + prompt.strip()).strip()
+
+    return (
+        model,
+        runtime_kwargs,
+        enabled_toolsets,
+        disabled_toolsets,
+        reasoning_config,
+        combined_ephemeral,
+    )
+
 
 def _telegramize_command_mentions(text: str, platform: Any) -> str:
     """Rewrite slash-command mentions to Telegram-valid command names.
@@ -646,6 +756,7 @@ from gateway.platforms.base import (
     MessageType,
     _reply_anchor_for_event,
     merge_pending_message_event,
+    should_suppress_gateway_response,
 )
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
@@ -5826,12 +5937,12 @@ class GatewayRunner:
                     )
                     return None
                 if _action == "rewrite":
-                    _new_text = _result.get("text")
-                    if isinstance(_new_text, str):
-                        event = dataclasses.replace(event, text=_new_text)
-                        source = event.source
+                    event = _patch_gateway_event_from_hook(event, _result)
+                    source = event.source
                     break
                 if _action == "allow":
+                    event = _patch_gateway_event_from_hook(event, _result)
+                    source = event.source
                     break
 
         if is_internal:
@@ -7713,6 +7824,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=self._reply_anchor_for_event(event),
                 channel_prompt=event.channel_prompt,
+                event=event,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -10380,6 +10492,13 @@ class GatewayRunner:
         """
         from pathlib import Path
         from urllib.parse import quote as _quote
+
+        if should_suppress_gateway_response(response, event):
+            logger.info(
+                "Suppressing post-stream media delivery for sentinel response in chat %s",
+                event.source.chat_id,
+            )
+            return
 
         try:
             # Capture [[as_document]] before extract_media strips it, so the
@@ -14528,6 +14647,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        event: Optional[MessageEvent] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -15075,7 +15195,7 @@ class GatewayRunner:
             # read *and* reassign the outer `_run_agent` parameter without
             # triggering an UnboundLocalError on the earlier read at
             # `_resolve_turn_agent_config(message, …)`.
-            nonlocal message
+            nonlocal message, enabled_toolsets, disabled_toolsets
 
             # session_key is now set via contextvars in _set_session_env()
             # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
@@ -15125,6 +15245,56 @@ class GatewayRunner:
                 source=source,
                 session_key=session_key,
             )
+
+            runtime_overrides: list[dict] = []
+            event_metadata = getattr(event, "metadata", None) if event is not None else None
+            if isinstance(event_metadata, dict):
+                metadata_override = event_metadata.get("gateway_runtime_overrides")
+                if isinstance(metadata_override, dict):
+                    runtime_overrides.append(metadata_override)
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+                hook_results = _invoke_hook(
+                    "gateway_runtime_override",
+                    event=event,
+                    source=source,
+                    gateway=self,
+                    session_key=session_key,
+                    message=message,
+                    model=model,
+                    runtime_kwargs=dict(runtime_kwargs or {}),
+                    enabled_toolsets=list(enabled_toolsets or []),
+                    disabled_toolsets=list(disabled_toolsets or []),
+                    reasoning_config=reasoning_config,
+                )
+                runtime_overrides.extend(
+                    result for result in hook_results if isinstance(result, dict)
+                )
+            except Exception as exc:
+                logger.warning("gateway_runtime_override invocation failed: %s", exc)
+
+            for override in runtime_overrides:
+                try:
+                    (
+                        model,
+                        runtime_kwargs,
+                        enabled_toolsets,
+                        disabled_toolsets,
+                        reasoning_config,
+                        combined_ephemeral,
+                    ) = _apply_gateway_runtime_override(
+                        model=model,
+                        runtime_kwargs=runtime_kwargs,
+                        enabled_toolsets=enabled_toolsets,
+                        disabled_toolsets=disabled_toolsets,
+                        reasoning_config=reasoning_config,
+                        combined_ephemeral=combined_ephemeral,
+                        override=override,
+                    )
+                except Exception as exc:
+                    logger.warning("Ignoring invalid gateway runtime override: %s", exc)
+
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             # Set up stream consumer for token streaming or interim commentary.
@@ -16348,6 +16518,12 @@ class GatewayRunner:
                         or (_sc and getattr(_sc, "final_content_delivered", False))
                     )
                     first_response = result.get("final_response", "")
+                    if should_suppress_gateway_response(first_response, event):
+                        logger.info(
+                            "Queued follow-up for session %s: suppressing sentinel response before continuing.",
+                            session_key or "?",
+                        )
+                        first_response = ""
                     if first_response and not _already_streamed:
                         try:
                             logger.info(
@@ -16442,6 +16618,7 @@ class GatewayRunner:
                     _interrupt_depth=_interrupt_depth + 1,
                     event_message_id=next_message_id,
                     channel_prompt=next_channel_prompt,
+                    event=pending_event,
                 )
                 return _preserve_queued_followup_history_offset(result, followup_result)
         finally:

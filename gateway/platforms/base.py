@@ -18,7 +18,9 @@ import sys
 import uuid
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
+from typing import Any
 
+from hermes_constants import get_hermes_home
 from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
@@ -107,6 +109,89 @@ def should_send_media_as_audio(platform, ext: str, is_voice: bool = False) -> bo
             return is_voice
         return normalized_ext in _TELEGRAM_AUDIO_ATTACHMENT_EXTS
     return True
+
+
+def _config_reply_suppression_settings() -> dict:
+    """Best-effort config lookup for final-response suppression."""
+    settings: dict = {}
+    try:
+        import yaml as _yaml
+
+        cfg_path = get_hermes_home() / "config.yaml"
+        if cfg_path.exists():
+            cfg = _yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            if isinstance(cfg, dict):
+                for key in ("reply_suppression", "gateway_profiles"):
+                    section = cfg.get(key)
+                    if isinstance(section, dict):
+                        settings.update(section)
+    except Exception:
+        return settings
+    return settings
+
+
+def _response_suppression_metadata(event) -> dict:
+    metadata = getattr(event, "metadata", None)
+    if not isinstance(metadata, dict):
+        return {}
+    nested = metadata.get("reply_suppression")
+    merged = dict(nested) if isinstance(nested, dict) else {}
+    for key in ("enabled", "sentinel", "denial_sentinel"):
+        if key in metadata:
+            merged[key] = metadata[key]
+    return merged
+
+
+def response_denial_sentinel(event=None) -> str:
+    """Resolve the sentinel that suppresses final gateway delivery."""
+    metadata = _response_suppression_metadata(event)
+    for key in ("denial_sentinel", "sentinel"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    env_value = os.getenv("HERMES_REPLY_DENIAL_SENTINEL", "").strip()
+    if env_value:
+        return env_value
+
+    settings = _config_reply_suppression_settings()
+    for key in ("denial_sentinel", "sentinel", "reply_denial_sentinel"):
+        value = settings.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return "REPLY_DENIED"
+
+
+def should_suppress_gateway_response(response: Any, event=None) -> bool:
+    """Return True when a final response is an exact denial sentinel."""
+    if not isinstance(response, str):
+        return False
+
+    metadata = _response_suppression_metadata(event)
+    if metadata.get("enabled") is False:
+        return False
+
+    settings = _config_reply_suppression_settings()
+    if settings.get("enabled") is False and "enabled" not in metadata:
+        return False
+
+    sentinel = response_denial_sentinel(event)
+    if not sentinel:
+        return False
+    stripped = response.strip()
+    if stripped == sentinel:
+        return True
+    lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+    if not lines or lines[0] != sentinel:
+        return False
+    internal_only = True
+    for line in lines[1:]:
+        if line.startswith("MEDIA:") or line in {"[[audio_as_voice]]", "[[as_document]]"}:
+            continue
+        internal_only = False
+        break
+    return internal_only
 
 
 def utf16_len(s: str) -> int:
@@ -961,6 +1046,10 @@ class MessageEvent:
     # from ``text`` so the sender-prefix logic in run.py can operate on the
     # trigger message alone, then prepend this context afterward.
     channel_context: Optional[str] = None
+
+    # Plugin/gateway metadata for per-message routing policy.  Core adapters
+    # should treat this as best-effort extension data and avoid persisting it.
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -3102,6 +3191,15 @@ class BasePlatformAdapter(ABC):
                 response = None
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
+            if response:
+                if should_suppress_gateway_response(response, event):
+                    logger.info(
+                        "[%s] Suppressing final response sentinel for %s",
+                        self.name,
+                        event.source.chat_id,
+                    )
+                    response = None
+
             if response:
                 # Capture [[as_document]] before extract_media strips it, so the
                 # dispatch partition below can route image-extension files

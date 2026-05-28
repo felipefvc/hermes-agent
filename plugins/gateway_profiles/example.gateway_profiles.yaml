@@ -1,0 +1,32 @@
+enabled: true
+
+admins:
+  - platform: whatsapp
+    user_id: "5511999999999@s.whatsapp.net"
+
+defaults:
+  denial_sentinel: REPLY_DENIED
+  skill: gateway-profiles:gateway-profiles
+  triggers:
+    dm: true
+    group: mention_or_reply
+    mention_aliases:
+      - hermes
+    reply_to_bot: true
+    links: false
+
+profiles:
+  default:
+    prompt: |
+      You are Hermes in a messaging chat. Be concise and respect the chat context.
+    reasoning: medium
+    toolsets:
+      - web
+      - skills
+      - memory
+
+bindings:
+  - platform: whatsapp
+    chat_id: "120363000000000000@g.us"
+    chat_type: group
+    profile: default

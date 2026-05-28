@@ -151,6 +151,12 @@ VALID_HOOKS: Set[str] = {
     #   {"action": "allow"}  /  None             -> normal dispatch
     # Kwargs: event: MessageEvent, gateway: GatewayRunner, session_store.
     "pre_gateway_dispatch",
+    # Gateway runtime override hook. Fired before a gateway-created AIAgent is
+    # constructed/reused for a turn. Plugins may return a dict with generic
+    # runtime overrides such as model/provider/reasoning/toolsets/channel_prompt.
+    # Kwargs: event, source, gateway, session_key, message, model,
+    # runtime_kwargs, enabled_toolsets, disabled_toolsets, reasoning_config.
+    "gateway_runtime_override",
     # Approval lifecycle hooks. Fired by tools/approval.py when a dangerous
     # command needs user approval -- fires BOTH for CLI-interactive prompts
     # and for gateway/ACP approvals (Telegram, Discord, Slack, TUI, etc.).

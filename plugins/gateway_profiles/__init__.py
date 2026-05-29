@@ -122,12 +122,18 @@ def _raw_dict(event: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _normalize_messaging_id(value: Any) -> str:
+    if not value:
+        return ""
+    return re.sub(r":\d+(?=@)", "", str(value).strip())
+
+
 def _reply_to_bot(event: Any) -> bool:
     raw = _raw_dict(event)
     if raw.get("replyToBot") is True:
         return True
-    quoted = str(raw.get("quotedParticipant") or raw.get("quotedRemoteJid") or "")
-    bot_ids = {str(item) for item in raw.get("botIds", []) if item}
+    quoted = _normalize_messaging_id(raw.get("quotedParticipant") or raw.get("quotedRemoteJid"))
+    bot_ids = {_normalize_messaging_id(item) for item in raw.get("botIds", []) if item}
     return bool(quoted and quoted in bot_ids)
 
 
@@ -218,11 +224,19 @@ def _allow_result(decision: HarnessDecision, event: Any) -> dict[str, Any]:
     if isinstance(prompt, str) and prompt.strip():
         prompt_bits.append(prompt.strip())
 
+    gateway_profile_meta = {
+        "profile": decision.profile_name,
+        "trigger": decision.reason,
+    }
+    debug_chat_id = profile.get("debug_chat_id") or profile.get("admin_debug_chat_id")
+    if isinstance(debug_chat_id, str) and debug_chat_id.strip():
+        gateway_profile_meta["debug_chat_id"] = debug_chat_id.strip()
+    debug_platform = profile.get("debug_platform") or profile.get("admin_debug_platform")
+    if isinstance(debug_platform, str) and debug_platform.strip():
+        gateway_profile_meta["debug_platform"] = debug_platform.strip().lower()
+
     metadata = {
-        "gateway_profiles": {
-            "profile": decision.profile_name,
-            "trigger": decision.reason,
-        },
+        "gateway_profiles": gateway_profile_meta,
         "reply_suppression": {
             "enabled": profile.get("reply_suppression", True) is not False,
             "sentinel": profile.get("denial_sentinel") or "REPLY_DENIED",
@@ -281,12 +295,26 @@ def render_profiles_command(config: dict[str, Any], event: Any, raw_args: str) -
     return "Usage: /profiles [status|route|reload]"
 
 
-def _maybe_send_command_reply(gateway: Any, event: Any, text: str) -> None:
-    adapter = getattr(gateway, "adapters", {}).get(getattr(event.source, "platform", None))
+def _maybe_send_command_reply(gateway: Any, event: Any, text: str, config: dict[str, Any] | None = None) -> None:
+    adapter_key = getattr(event.source, "platform", None)
+    chat_id = event.source.chat_id
+    if isinstance(config, dict) and _source_field(event.source, "chat_type").lower() == "group":
+        _profile_name, profile = select_profile(config, event)
+        if isinstance(profile, dict):
+            debug_chat_id = profile.get("debug_chat_id") or profile.get("admin_debug_chat_id")
+            if isinstance(debug_chat_id, str) and debug_chat_id.strip():
+                chat_id = debug_chat_id.strip()
+                debug_platform = profile.get("debug_platform") or profile.get("admin_debug_platform")
+                if isinstance(debug_platform, str) and debug_platform.strip():
+                    try:
+                        adapter_key = type(adapter_key)(debug_platform.strip().lower())
+                    except Exception:
+                        adapter_key = debug_platform.strip().lower()
+    adapter = getattr(gateway, "adapters", {}).get(adapter_key)
     if adapter is None:
         return
     try:
-        asyncio.get_running_loop().create_task(adapter.send(event.source.chat_id, text))
+        asyncio.get_running_loop().create_task(adapter.send(chat_id, text))
     except RuntimeError:
         logger.info("Gateway profiles command reply: %s", text)
 
@@ -297,10 +325,10 @@ def pre_gateway_dispatch(event: Any, gateway: Any = None, session_store: Any = N
     text = str(getattr(event, "text", "") or "")
     if text.startswith("/profiles") or text.startswith("/gateway-profiles"):
         if not _is_admin(config, event):
-            _maybe_send_command_reply(gateway, event, "Gateway profiles admin access is not configured for this sender.")
+            _maybe_send_command_reply(gateway, event, "Gateway profiles admin access is not configured for this sender.", config)
             return {"action": "skip", "reason": "gateway_profiles_admin_denied"}
         raw_args = text.split(maxsplit=1)[1] if len(text.split(maxsplit=1)) > 1 else ""
-        _maybe_send_command_reply(gateway, event, render_profiles_command(config, event, raw_args))
+        _maybe_send_command_reply(gateway, event, render_profiles_command(config, event, raw_args), config)
         return {"action": "skip", "reason": "gateway_profiles_command"}
 
     decision = decide_event(config, event)

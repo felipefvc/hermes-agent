@@ -1082,6 +1082,81 @@ def _load_gateway_config() -> dict:
     return {}
 
 
+def _gateway_profile_debug_route_for_source(source: Any) -> Dict[str, str]:
+    """Resolve a bound gateway profile's debug target from gateway_profiles.yaml.
+
+    Gateway profile hooks normally stamp ``event.metadata.gateway_profiles``
+    before dispatch. Resumed/interrupted group turns can arrive without that
+    metadata, so use the persistent binding as a privacy fallback instead of
+    letting tool progress fall back to the originating group.
+    """
+    if not source or str(getattr(source, "chat_type", "") or "").lower() != "group":
+        return {}
+
+    profiles_path = _hermes_home / "gateway_profiles.yaml"
+    try:
+        if not profiles_path.exists():
+            return {}
+        import yaml
+
+        config = yaml.safe_load(profiles_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        logger.debug(
+            "Could not load gateway profiles config from %s",
+            profiles_path,
+            exc_info=True,
+        )
+        return {}
+
+    if not isinstance(config, dict) or config.get("enabled") is False:
+        return {}
+
+    source_platform = str(
+        getattr(
+            getattr(source, "platform", None),
+            "value",
+            getattr(source, "platform", ""),
+        )
+        or ""
+    ).lower()
+    source_chat_id = str(getattr(source, "chat_id", "") or "")
+    source_chat_type = str(getattr(source, "chat_type", "") or "").lower()
+
+    bindings = config.get("bindings") if isinstance(config.get("bindings"), list) else []
+    matched_profile_name = ""
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            continue
+        binding_platform = str(binding.get("platform", "") or "").lower()
+        binding_chat_id = str(binding.get("chat_id", "") or "")
+        binding_chat_type = str(binding.get("chat_type", "") or "").lower()
+        if binding_platform and binding_platform != source_platform:
+            continue
+        if binding_chat_type and binding_chat_type != source_chat_type:
+            continue
+        if binding_chat_id != source_chat_id:
+            continue
+        matched_profile_name = str(binding.get("profile", "") or "")
+        break
+
+    if not matched_profile_name:
+        return {}
+
+    profiles = config.get("profiles") if isinstance(config.get("profiles"), dict) else {}
+    profile = profiles.get(matched_profile_name)
+    if not isinstance(profile, dict):
+        return {}
+
+    route: Dict[str, str] = {}
+    debug_chat_id = profile.get("debug_chat_id") or profile.get("admin_debug_chat_id")
+    if isinstance(debug_chat_id, str) and debug_chat_id.strip():
+        route["debug_chat_id"] = debug_chat_id.strip()
+    debug_platform = profile.get("debug_platform") or profile.get("admin_debug_platform")
+    if isinstance(debug_platform, str) and debug_platform.strip():
+        route["debug_platform"] = debug_platform.strip().lower()
+    return route
+
+
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
@@ -14684,6 +14759,39 @@ class GatewayRunner:
         
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        from gateway.config import Platform
+
+        _gateway_profile_meta = {}
+        try:
+            _event_metadata = getattr(event, "metadata", None) or {}
+            if isinstance(_event_metadata, dict):
+                _maybe_gp_meta = _event_metadata.get("gateway_profiles") or {}
+                if isinstance(_maybe_gp_meta, dict):
+                    _gateway_profile_meta = _maybe_gp_meta
+        except Exception:
+            _gateway_profile_meta = {}
+        _debug_chat_id = str(_gateway_profile_meta.get("debug_chat_id") or "").strip()
+        if not _debug_chat_id:
+            _fallback_debug_route = _gateway_profile_debug_route_for_source(source)
+            if _fallback_debug_route:
+                _gateway_profile_meta = {**_gateway_profile_meta, **_fallback_debug_route}
+                _debug_chat_id = str(_gateway_profile_meta.get("debug_chat_id") or "").strip()
+        _debug_platform = source.platform
+        _debug_route_error = False
+        if _debug_chat_id and getattr(source, "chat_type", "") == "group":
+            _debug_platform_name = str(_gateway_profile_meta.get("debug_platform") or "").strip().lower()
+            if _debug_platform_name:
+                try:
+                    _debug_platform = Platform(_debug_platform_name)
+                except Exception:
+                    logger.warning(
+                        "Ignoring gateway profile debug target with unknown platform: %s",
+                        _debug_platform_name,
+                    )
+                    _debug_route_error = True
+                    _debug_chat_id = ""
+        else:
+            _debug_chat_id = ""
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
@@ -14732,13 +14840,17 @@ class GatewayRunner:
         )
         # Disable tool progress for webhooks - they don't support message editing,
         # so each progress line would be sent as a separate message.
-        from gateway.config import Platform
-        tool_progress_enabled = progress_mode != "off" and source.platform != Platform.WEBHOOK
+        tool_progress_enabled = (
+            progress_mode != "off"
+            and source.platform != Platform.WEBHOOK
+            and not _debug_route_error
+        )
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
         interim_assistant_messages_enabled = (
             source.platform != Platform.WEBHOOK
+            and not _debug_route_error
             and is_truthy_value(
                 display_config.get("interim_assistant_messages"),
                 default=True,
@@ -14897,7 +15009,8 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = (
+        _progress_chat_id = _debug_chat_id or source.chat_id
+        _progress_metadata = None if _debug_chat_id else (
             self._thread_metadata_for_source(source, event_message_id)
             if _progress_thread_id == source.thread_id
             else {"thread_id": _progress_thread_id}
@@ -14912,7 +15025,7 @@ class GatewayRunner:
             if not progress_queue:
                 return
 
-            adapter = self.adapters.get(source.platform)
+            adapter = self.adapters.get(_debug_platform if _debug_chat_id else source.platform)
             if not adapter:
                 return
 
@@ -15005,7 +15118,7 @@ class GatewayRunner:
                         # Try to edit the existing progress message
                         full_text = "\n".join(progress_lines)
                         result = await adapter.edit_message(
-                            chat_id=source.chat_id,
+                            chat_id=_progress_chat_id,
                             message_id=progress_msg_id,
                             content=full_text,
                         )
@@ -15021,7 +15134,7 @@ class GatewayRunner:
                                 )
                             can_edit = False
                             _flood_result = await adapter.send(
-                                chat_id=source.chat_id,
+                                chat_id=_progress_chat_id,
                                 content=msg,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
@@ -15037,7 +15150,7 @@ class GatewayRunner:
                             # First tool: send all accumulated text as new message
                             full_text = "\n".join(progress_lines)
                             result = await adapter.send(
-                                chat_id=source.chat_id,
+                                chat_id=_progress_chat_id,
                                 content=full_text,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
@@ -15045,7 +15158,7 @@ class GatewayRunner:
                         else:
                             # Editing unsupported: send just this line
                             result = await adapter.send(
-                                chat_id=source.chat_id,
+                                chat_id=_progress_chat_id,
                                 content=msg,
                                 reply_to=_progress_reply_to,
                                 metadata=_progress_metadata,
@@ -15060,7 +15173,7 @@ class GatewayRunner:
                     # Restore typing indicator
                     await asyncio.sleep(0.3)
                     if _run_still_current():
-                        await adapter.send_typing(source.chat_id, metadata=_progress_metadata)
+                        await adapter.send_typing(_progress_chat_id, metadata=_progress_metadata)
 
                 except queue.Empty:
                     await asyncio.sleep(0.3)
@@ -15081,7 +15194,7 @@ class GatewayRunner:
                                     _pending_text = "\n".join(progress_lines)
                                     try:
                                         await adapter.edit_message(
-                                            chat_id=source.chat_id,
+                                            chat_id=_progress_chat_id,
                                             message_id=progress_msg_id,
                                             content=_pending_text,
                                         )
@@ -15100,7 +15213,7 @@ class GatewayRunner:
                         full_text = "\n".join(progress_lines)
                         try:
                             await adapter.edit_message(
-                                chat_id=source.chat_id,
+                                chat_id=_progress_chat_id,
                                 message_id=progress_msg_id,
                                 content=full_text,
                             )
@@ -15148,9 +15261,9 @@ class GatewayRunner:
             )
 
         # Bridge sync status_callback → async adapter.send for context pressure
-        _status_adapter = self.adapters.get(source.platform)
-        _status_chat_id = source.chat_id
-        if source.platform == Platform.FEISHU and source.thread_id and event_message_id:
+        _status_adapter = self.adapters.get(_debug_platform if _debug_chat_id else source.platform)
+        _status_chat_id = _debug_chat_id or source.chat_id
+        if not _debug_chat_id and source.platform == Platform.FEISHU and source.thread_id and event_message_id:
             # Feishu topics only keep messages inside the topic when they are
             # sent via the reply API with reply_in_thread=true. Status/interim,
             # approval, and stream-consumer paths usually only receive metadata,
@@ -15160,7 +15273,13 @@ class GatewayRunner:
                 "reply_to_message_id": event_message_id,
             }
         else:
-            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
+            _status_thread_metadata = (
+                None
+                if _debug_chat_id
+                else self._thread_metadata_for_source(source, event_message_id)
+                if _progress_thread_id
+                else None
+            )
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -15381,6 +15500,20 @@ class GatewayRunner:
 
             def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
                 if not _run_still_current():
+                    return
+                if _debug_chat_id and not already_streamed:
+                    if not _status_adapter or not str(text or "").strip():
+                        return
+                    safe_schedule_threadsafe(
+                        _status_adapter.send(
+                            _status_chat_id,
+                            text,
+                            metadata=_status_thread_metadata,
+                        ),
+                        _loop_for_step,
+                        logger=logger,
+                        log_message="interim_assistant_callback scheduling error",
+                    )
                     return
                 if _stream_consumer is not None:
                     if already_streamed:
@@ -16168,7 +16301,7 @@ class GatewayRunner:
         async def _notify_long_running():
             if _NOTIFY_INTERVAL is None:
                 return  # Notifications disabled (gateway_notify_interval: 0)
-            _notify_adapter = self.adapters.get(source.platform)
+            _notify_adapter = self.adapters.get(_debug_platform if _debug_chat_id else source.platform)
             if not _notify_adapter:
                 return
             while True:
@@ -16190,7 +16323,7 @@ class GatewayRunner:
                         pass
                 try:
                     _notify_res = await _notify_adapter.send(
-                        source.chat_id,
+                        _debug_chat_id or source.chat_id,
                         f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
                         metadata=_status_thread_metadata,
                     )

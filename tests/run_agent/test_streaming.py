@@ -896,6 +896,112 @@ class TestCodexStreamCallbacks:
         assert response is fallback_response
         mock_fallback.assert_called_once_with({}, client=mock_client)
 
+    def test_codex_stream_recovers_text_when_sdk_parser_hits_none_output(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "codex_responses"
+        agent._interrupt_requested = False
+
+        class _ParserFailureStream:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+            def __iter__(self_inner):
+                yield SimpleNamespace(type="response.output_text.delta", delta="Oi")
+                yield SimpleNamespace(type="response.output_text.delta", delta="!")
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self_inner):
+                raise AssertionError("parser failure should recover before get_final_response")
+
+        mock_client = MagicMock()
+        mock_client.responses.stream.return_value = _ParserFailureStream()
+
+        response = agent._run_codex_stream({}, client=mock_client)
+
+        assert response.status == "completed"
+        assert response.output[0].content[0].text == "Oi!"
+        assert response.output_text == "Oi!"
+
+    def test_codex_stream_recovers_output_item_when_sdk_parser_hits_none_output(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "codex_responses"
+        agent._interrupt_requested = False
+
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="collected item ok")],
+        )
+
+        class _ParserFailureStream:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+            def __iter__(self_inner):
+                yield SimpleNamespace(type="response.output_item.done", item=output_item)
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self_inner):
+                raise AssertionError("parser failure should recover before get_final_response")
+
+        mock_client = MagicMock()
+        mock_client.responses.stream.return_value = _ParserFailureStream()
+
+        response = agent._run_codex_stream({}, client=mock_client)
+
+        assert response.status == "completed"
+        assert response.output == [output_item]
+
+    def test_codex_create_stream_fallback_sanitizes_concrete_none_output(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1",
+            model="test/model",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+        agent.api_mode = "codex_responses"
+
+        concrete_response = SimpleNamespace(status="completed", output=None)
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = concrete_response
+
+        response = agent._run_codex_create_stream_fallback(
+            {"model": "test/model", "instructions": "hi", "input": []},
+            client=mock_client,
+        )
+
+        assert response is concrete_response
+        assert response.output == []
+
     def test_codex_create_stream_fallback_refreshes_activity_on_every_event(self):
         from run_agent import AIAgent
 

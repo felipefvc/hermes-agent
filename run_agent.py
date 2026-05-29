@@ -7160,7 +7160,7 @@ class AIAgent:
                     # but get_final_response() can return an empty output list.
                     # Backfill from collected items or synthesize from deltas.
                     _out = getattr(final_response, "output", None)
-                    if isinstance(_out, list) and not _out:
+                    if not (isinstance(_out, list) and _out):
                         if collected_output_items:
                             final_response.output = list(collected_output_items)
                             logger.debug(
@@ -7179,6 +7179,8 @@ class AIAgent:
                                 "Codex stream: synthesized output from %d text deltas (%d chars)",
                                 len(self._codex_streamed_text_parts), len(assembled),
                             )
+                        elif _out is None:
+                            final_response.output = []
                     return final_response
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
                 if attempt < max_stream_retries:
@@ -7196,6 +7198,51 @@ class AIAgent:
                     exc,
                 )
                 return self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+            except TypeError as exc:
+                err_text = str(exc)
+                parser_none_output = "NoneType" in err_text and "iterable" in err_text
+                if parser_none_output:
+                    if collected_output_items:
+                        logger.warning(
+                            "Codex Responses stream parser hit response.output=None; "
+                            "recovering %d collected output item(s). %s",
+                            len(collected_output_items),
+                            self._client_log_context(),
+                        )
+                        return SimpleNamespace(
+                            status="completed",
+                            model=self.model,
+                            output=list(collected_output_items),
+                            usage=None,
+                        )
+                    if self._codex_streamed_text_parts and not has_tool_calls:
+                        assembled = "".join(self._codex_streamed_text_parts)
+                        logger.warning(
+                            "Codex Responses stream parser hit response.output=None; "
+                            "recovering %d streamed text chars. %s",
+                            len(assembled),
+                            self._client_log_context(),
+                        )
+                        return SimpleNamespace(
+                            status="completed",
+                            model=self.model,
+                            output=[SimpleNamespace(
+                                type="message",
+                                role="assistant",
+                                status="completed",
+                                content=[SimpleNamespace(type="output_text", text=assembled)],
+                            )],
+                            output_text=assembled,
+                            usage=None,
+                        )
+                    fallback_response = self._run_codex_create_stream_fallback(api_kwargs, client=active_client)
+                    if getattr(fallback_response, "output", None) is None:
+                        try:
+                            fallback_response.output = []
+                        except Exception:
+                            pass
+                    return fallback_response
+                raise
             except RuntimeError as exc:
                 err_text = str(exc)
                 missing_completed = "response.completed" in err_text
@@ -7255,6 +7302,11 @@ class AIAgent:
 
         # Compatibility shim for mocks or providers that still return a concrete response.
         if hasattr(stream_or_response, "output"):
+            if getattr(stream_or_response, "output", None) is None:
+                try:
+                    stream_or_response.output = []
+                except Exception:
+                    pass
             return stream_or_response
         if not hasattr(stream_or_response, "__iter__"):
             return stream_or_response

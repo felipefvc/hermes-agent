@@ -121,7 +121,19 @@ function trackSentMessageId(sent) {
 
 function normalizeWhatsAppId(value) {
   if (!value) return '';
-  return String(value).replace(':', '@');
+  return String(value).trim().replace(/:\d+(?=@)/, '');
+}
+
+function isReplyToBot({ quotedMessageId, quotedParticipant, quotedRemoteJid, botIds }) {
+  if (quotedMessageId && recentlySentIds.has(quotedMessageId)) {
+    return true;
+  }
+
+  const normalizedBotIds = new Set((botIds || []).map(normalizeWhatsAppId).filter(Boolean));
+  return Boolean(
+    (quotedParticipant && normalizedBotIds.has(normalizeWhatsAppId(quotedParticipant))) ||
+    (quotedRemoteJid && normalizedBotIds.has(normalizeWhatsAppId(quotedRemoteJid)))
+  );
 }
 
 function getMessageContent(msg) {
@@ -321,6 +333,7 @@ async function startSocket() {
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
       const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
+      const replyToBot = isReplyToBot({ quotedMessageId, quotedParticipant, quotedRemoteJid, botIds });
 
       // Extract message body
       let body = '';
@@ -436,6 +449,7 @@ async function startSocket() {
         quotedParticipant,
         quotedRemoteJid,
         hasQuotedMessage,
+        replyToBot,
         botIds,
         timestamp: msg.messageTimestamp,
       };

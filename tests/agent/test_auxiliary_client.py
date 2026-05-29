@@ -2014,6 +2014,81 @@ class TestCodexAdapterReasoningTranslation:
         assert captured.get("include") == ["reasoning.encrypted_content"]
 
 
+class TestCodexAuxiliaryAdapterOutputRecovery:
+    def test_recovers_output_item_when_sdk_parser_hits_none_output(self):
+        output_item = SimpleNamespace(
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[SimpleNamespace(type="output_text", text="Robofilos Chat")],
+        )
+
+        class FakeStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_item.done", item=output_item)
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self):
+                raise AssertionError("parser failure should recover before get_final_response")
+
+        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=lambda **kwargs: FakeStream()))
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "make title"}])
+
+        assert response.choices[0].message.content == "Robofilos Chat"
+
+    def test_recovers_text_deltas_when_sdk_parser_hits_none_output(self):
+        class FakeStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                yield SimpleNamespace(type="response.output_text.delta", delta="Short")
+                yield SimpleNamespace(type="response.output_text.delta", delta=" Title")
+                raise TypeError("'NoneType' object is not iterable")
+
+            def get_final_response(self):
+                raise AssertionError("parser failure should recover before get_final_response")
+
+        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=lambda **kwargs: FakeStream()))
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "make title"}])
+
+        assert response.choices[0].message.content == "Short Title"
+
+    def test_final_response_with_output_none_does_not_crash(self):
+        class FakeStream:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def __iter__(self):
+                return iter(())
+
+            def get_final_response(self):
+                return SimpleNamespace(output=None, usage=None)
+
+        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=lambda **kwargs: FakeStream()))
+        adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
+
+        response = adapter.create(messages=[{"role": "user", "content": "make title"}])
+
+        assert response.choices[0].message.content is None
+
+
 class TestVisionAutoSkipsKimiCoding:
     """_resolve_auto vision branch skips providers that have no vision on
     their main endpoint (e.g. Kimi Coding Plan /coding) and falls through

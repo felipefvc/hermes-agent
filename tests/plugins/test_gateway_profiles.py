@@ -85,6 +85,30 @@ def test_reply_to_bot_triggers_profile():
     assert should_trigger(decision_profile(_config()), event) == (True, "reply_to_bot")
 
 
+def test_reply_to_bot_triggers_from_bridge_flag():
+    event = _event(
+        "what do you think?",
+        raw_message={
+            "replyToBot": True,
+            "quotedMessageId": "outbound-msg",
+        },
+    )
+
+    assert should_trigger(decision_profile(_config()), event) == (True, "reply_to_bot")
+
+
+def test_reply_to_bot_normalizes_whatsapp_device_ids():
+    event = _event(
+        "what do you think?",
+        raw_message={
+            "quotedParticipant": "bot:12@s.whatsapp.net",
+            "botIds": ["bot@s.whatsapp.net"],
+        },
+    )
+
+    assert should_trigger(decision_profile(_config()), event) == (True, "reply_to_bot")
+
+
 def test_link_trigger_is_opt_in():
     profile = decision_profile(_config())
 
@@ -106,6 +130,19 @@ def test_pre_dispatch_allow_sets_prompt_skill_runtime_and_suppression(monkeypatc
     assert result["runtime_overrides"]["model"] == "nous/test-model"
     assert result["runtime_overrides"]["toolsets"] == ["web", "skills"]
     assert result["metadata"]["reply_suppression"]["sentinel"] == "REPLY_DENIED"
+
+
+def test_pre_dispatch_sets_cross_platform_debug_target(monkeypatch):
+    cfg = _config()
+    cfg["profiles"]["default"]["debug_chat_id"] = "telegram-debug-chat"
+    cfg["profiles"]["default"]["debug_platform"] = "telegram"
+    monkeypatch.setattr("plugins.gateway_profiles._CONFIG", SimpleNamespace(load=lambda **_: cfg))
+
+    result = pre_gateway_dispatch(_event("hermes use web"))
+
+    gateway_profile_meta = result["metadata"]["gateway_profiles"]
+    assert gateway_profile_meta["debug_chat_id"] == "telegram-debug-chat"
+    assert gateway_profile_meta["debug_platform"] == "telegram"
 
 
 def decision_profile(config: dict) -> dict:

@@ -780,26 +780,63 @@ class _CodexCompletionsAdapter:
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
-            with self._client.responses.stream(**resp_kwargs) as stream:
-                for _event in stream:
+            try:
+                with self._client.responses.stream(**resp_kwargs) as stream:
+                    for _event in stream:
+                        _check_cancelled()
+                        _etype = getattr(_event, "type", "")
+                        if _etype == "response.output_item.done":
+                            _done = getattr(_event, "item", None)
+                            if _done is not None:
+                                collected_output_items.append(_done)
+                        elif "output_text.delta" in _etype:
+                            _delta = getattr(_event, "delta", "")
+                            if _delta:
+                                collected_text_deltas.append(_delta)
+                        elif "function_call" in _etype:
+                            has_function_calls = True
                     _check_cancelled()
-                    _etype = getattr(_event, "type", "")
-                    if _etype == "response.output_item.done":
-                        _done = getattr(_event, "item", None)
-                        if _done is not None:
-                            collected_output_items.append(_done)
-                    elif "output_text.delta" in _etype:
-                        _delta = getattr(_event, "delta", "")
-                        if _delta:
-                            collected_text_deltas.append(_delta)
-                    elif "function_call" in _etype:
-                        has_function_calls = True
-                _check_cancelled()
-                final = stream.get_final_response()
+                    final = stream.get_final_response()
+            except TypeError as exc:
+                err_text = str(exc)
+                parser_none_output = "NoneType" in err_text and "iterable" in err_text
+                if not parser_none_output:
+                    raise
+                if collected_output_items:
+                    logger.debug(
+                        "Codex auxiliary stream parser hit response.output=None; "
+                        "recovering %d collected output item(s).",
+                        len(collected_output_items),
+                    )
+                    final = SimpleNamespace(
+                        status="completed",
+                        model=model,
+                        output=list(collected_output_items),
+                        usage=None,
+                    )
+                elif collected_text_deltas and not has_function_calls:
+                    assembled = "".join(collected_text_deltas)
+                    logger.debug(
+                        "Codex auxiliary stream parser hit response.output=None; "
+                        "recovering %d streamed text chars.",
+                        len(assembled),
+                    )
+                    final = SimpleNamespace(
+                        status="completed",
+                        model=model,
+                        output=[SimpleNamespace(
+                            type="message", role="assistant", status="completed",
+                            content=[SimpleNamespace(type="output_text", text=assembled)],
+                        )],
+                        output_text=assembled,
+                        usage=None,
+                    )
+                else:
+                    raise
 
-            # Backfill empty output from collected stream events
+            # Backfill missing/empty output from collected stream events.
             _output = getattr(final, "output", None)
-            if isinstance(_output, list) and not _output:
+            if not (isinstance(_output, list) and _output):
                 if collected_output_items:
                     final.output = list(collected_output_items)
                     logger.debug(
@@ -819,6 +856,8 @@ class _CodexCompletionsAdapter:
                         "Codex auxiliary: synthesized from %d deltas (%d chars)",
                         len(collected_text_deltas), len(assembled),
                     )
+                elif _output is None:
+                    final.output = []
 
             # Extract text and tool calls from the Responses output.
             # Items may be SDK objects (attrs) or dicts (raw/fallback paths),
@@ -829,7 +868,7 @@ class _CodexCompletionsAdapter:
                     val = obj.get(key, default)
                 return val if val is not None else default
 
-            for item in getattr(final, "output", []):
+            for item in (getattr(final, "output", None) or []):
                 item_type = _item_get(item, "type")
                 if item_type == "message":
                     for part in (_item_get(item, "content") or []):

@@ -139,7 +139,7 @@ class TestGenerate:
 
         fake_client = SimpleNamespace(
             responses=SimpleNamespace(
-                stream=lambda **kwargs: _FakeStream([done_event], final_response)
+                create=lambda **kwargs: _FakeStream([done_event], final_response)
             )
         )
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
@@ -175,7 +175,7 @@ class TestGenerate:
             final_response = SimpleNamespace(output=[], status="completed", output_text="")
             return _FakeStream([done_event], final_response)
 
-        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=_stream))
+        fake_client = SimpleNamespace(responses=SimpleNamespace(create=_stream))
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
 
         result = provider.generate("a cat", aspect_ratio="portrait")
@@ -183,6 +183,7 @@ class TestGenerate:
 
         assert captured["model"] == "gpt-5.4"
         assert captured["store"] is False
+        assert captured["stream"] is True
         assert captured["input"][0]["type"] == "message"
         assert captured["input"][0]["role"] == "user"
         assert captured["input"][0]["content"][0]["type"] == "input_text"
@@ -212,7 +213,7 @@ class TestGenerate:
 
         fake_client = SimpleNamespace(
             responses=SimpleNamespace(
-                stream=lambda **kwargs: _FakeStream([partial_event], final_response)
+                create=lambda **kwargs: _FakeStream([partial_event], final_response)
             )
         )
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
@@ -235,8 +236,28 @@ class TestGenerate:
         final_response = SimpleNamespace(output=[final_item], status="completed", output_text="")
 
         fake_client = SimpleNamespace(
+            responses=SimpleNamespace(create=lambda **kwargs: final_response)
+        )
+        monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
+
+        result = provider.generate("a cat")
+        assert result["success"] is True
+        assert Path(result["image"]).exists()
+
+    def test_terminal_response_without_output_does_not_enter_sdk_parser(self, provider, monkeypatch):
+        monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
+
+        partial_event = SimpleNamespace(
+            type="response.image_generation_call.partial_image",
+            partial_image_b64=_b64_png(),
+        )
+        completed_event = SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(status="completed"),
+        )
+        fake_client = SimpleNamespace(
             responses=SimpleNamespace(
-                stream=lambda **kwargs: _FakeStream([], final_response)
+                create=lambda **kwargs: _FakeStream([partial_event, completed_event], None)
             )
         )
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
@@ -245,14 +266,13 @@ class TestGenerate:
         assert result["success"] is True
         assert Path(result["image"]).exists()
 
+
     def test_empty_response_returns_error(self, provider, monkeypatch):
         monkeypatch.setattr(codex_plugin, "_read_codex_access_token", lambda: "codex-token")
 
         final_response = SimpleNamespace(output=[], status="completed", output_text="")
         fake_client = SimpleNamespace(
-            responses=SimpleNamespace(
-                stream=lambda **kwargs: _FakeStream([], final_response)
-            )
+            responses=SimpleNamespace(create=lambda **kwargs: final_response)
         )
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
 
@@ -274,7 +294,7 @@ class TestGenerate:
         def _boom(**kwargs):
             raise RuntimeError("cloudflare 403")
 
-        fake_client = SimpleNamespace(responses=SimpleNamespace(stream=_boom))
+        fake_client = SimpleNamespace(responses=SimpleNamespace(create=_boom))
         monkeypatch.setattr(codex_plugin, "_build_codex_client", lambda: fake_client)
 
         result = provider.generate("a cat")

@@ -212,6 +212,184 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_run_agent_routes_gateway_profile_progress_to_debug_platform(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    whatsapp_adapter = ProgressCaptureAdapter(platform=Platform.WHATSAPP)
+    telegram_adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(whatsapp_adapter)
+    runner.adapters[telegram_adapter.platform] = telegram_adapter
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="test-group@g.us",
+        chat_type="group",
+    )
+    event = MessageEvent(
+        text="hello",
+        source=source,
+        metadata={
+            "gateway_profiles": {
+                "debug_chat_id": "telegram-debug-chat",
+                "debug_platform": "telegram",
+            }
+        },
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-debug-platform",
+        session_key="agent:main:whatsapp:group:test-group@g.us",
+        event=event,
+    )
+
+    assert result["final_response"] == "done"
+    assert telegram_adapter.sent
+    assert telegram_adapter.sent[0]["chat_id"] == "telegram-debug-chat"
+    assert telegram_adapter.sent[0]["metadata"] is None
+    assert not any(
+        "terminal" in call["content"] or "browser_navigate" in call["content"]
+        for call in whatsapp_adapter.sent
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_routes_bound_gateway_profile_progress_when_debug_metadata_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    import yaml
+    (tmp_path / "gateway_profiles.yaml").write_text(
+        yaml.dump({
+            "enabled": True,
+            "profiles": {
+                "comrad": {
+                    "debug_chat_id": "telegram-debug-chat",
+                    "debug_platform": "telegram",
+                },
+            },
+            "bindings": [{
+                "platform": "whatsapp",
+                "chat_id": "test-group@g.us",
+                "chat_type": "group",
+                "profile": "comrad",
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    whatsapp_adapter = ProgressCaptureAdapter(platform=Platform.WHATSAPP)
+    telegram_adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(whatsapp_adapter)
+    runner.adapters[telegram_adapter.platform] = telegram_adapter
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="test-group@g.us",
+        chat_type="group",
+    )
+    event = MessageEvent(
+        text="hello",
+        source=source,
+        metadata={"gateway_profiles": {"profile": "comrad", "trigger": "mention"}},
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-debug-binding-fallback",
+        session_key="agent:main:whatsapp:group:test-group@g.us",
+        event=event,
+    )
+
+    assert result["final_response"] == "done"
+    assert telegram_adapter.sent
+    assert telegram_adapter.sent[0]["chat_id"] == "telegram-debug-chat"
+    assert telegram_adapter.sent[0]["metadata"] is None
+    assert not any(
+        "terminal" in call["content"] or "browser_navigate" in call["content"]
+        for call in whatsapp_adapter.sent
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_does_not_fallback_debug_progress_to_group(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    whatsapp_adapter = ProgressCaptureAdapter(platform=Platform.WHATSAPP)
+    runner = _make_runner(whatsapp_adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="group@g.us",
+        chat_type="group",
+    )
+    event = MessageEvent(
+        text="hello",
+        source=source,
+        metadata={
+            "gateway_profiles": {
+                "debug_chat_id": "debug-chat",
+                "debug_platform": "not-a-platform",
+            }
+        },
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-debug-invalid",
+        session_key="agent:main:whatsapp:group:group@g.us",
+        event=event,
+    )
+
+    assert result["final_response"] == "done"
+    assert not any(
+        "terminal" in call["content"] or "browser_navigate" in call["content"]
+        for call in whatsapp_adapter.sent
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_agent_progress_does_not_use_event_message_id_for_telegram_dm(monkeypatch, tmp_path):
     """Telegram DM progress must not reuse event message id as thread metadata."""
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
@@ -641,6 +819,61 @@ async def test_run_agent_surfaces_interim_commentary_by_default(monkeypatch, tmp
     )
 
     assert any(call["content"] == "I'll inspect the repo first." for call in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_routes_gateway_profile_interim_commentary_to_debug_platform(monkeypatch, tmp_path):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = CommentaryAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    import yaml
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"interim_assistant_messages": True}}),
+        encoding="utf-8",
+    )
+
+    whatsapp_adapter = ProgressCaptureAdapter(platform=Platform.WHATSAPP)
+    telegram_adapter = ProgressCaptureAdapter(platform=Platform.TELEGRAM)
+    runner = _make_runner(whatsapp_adapter)
+    runner.adapters[telegram_adapter.platform] = telegram_adapter
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="test-group@g.us",
+        chat_type="group",
+    )
+    event = MessageEvent(
+        text="hello",
+        source=source,
+        metadata={
+            "gateway_profiles": {
+                "debug_chat_id": "telegram-debug-chat",
+                "debug_platform": "telegram",
+            }
+        },
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-debug-interim",
+        session_key="agent:main:whatsapp:group:test-group@g.us",
+        event=event,
+    )
+
+    assert result["final_response"] == "done"
+    assert any(call["content"] == "I'll inspect the repo first." for call in telegram_adapter.sent)
+    assert not any(call["content"] == "I'll inspect the repo first." for call in whatsapp_adapter.sent)
 
 
 @pytest.mark.asyncio

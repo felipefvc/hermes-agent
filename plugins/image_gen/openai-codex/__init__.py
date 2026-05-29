@@ -20,7 +20,7 @@ Output is saved as PNG under ``$HERMES_HOME/cache/images/``.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
@@ -161,13 +161,53 @@ def _build_codex_client():
         return None
 
 
-def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> Optional[str]:
-    """Stream a Codex Responses image_generation call and return the b64 image."""
-    image_b64: Optional[str] = None
+def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
+    value = getattr(obj, key, None)
+    if value is None and isinstance(obj, dict):
+        value = obj.get(key, default)
+    return value if value is not None else default
 
-    with client.responses.stream(
+
+def _close_stream(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.debug("Could not close Codex image stream", exc_info=True)
+
+
+def _iter_raw_response_events(stream_or_response: Any) -> Iterable[Any]:
+    if hasattr(stream_or_response, "__iter__"):
+        try:
+            yield from stream_or_response
+        finally:
+            _close_stream(stream_or_response)
+        return
+
+    # Test/mocking compatibility, and a defensive path in case the SDK ever
+    # returns a concrete response for stream=True.
+    yield {"type": "response.completed", "response": stream_or_response}
+
+
+def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> Optional[str]:
+    """Stream a Codex Responses image_generation call and return the b64 image.
+
+    ChatGPT's Codex backend is not quite the public Responses wire contract:
+    it requires ``store=false`` and its terminal ``response.completed`` frame
+    omits ``response.output``. The SDK's high-level ``responses.stream()``
+    helper parses that terminal frame with ``for output in response.output`` and
+    raises ``TypeError: 'NoneType' object is not iterable``. Use the raw
+    ``responses.create(stream=True)`` event stream instead and collect the image
+    from ``response.output_item.done`` / partial-image events ourselves.
+    """
+    image_b64: Optional[str] = None
+    final_response: Any = None
+
+    stream_or_response = client.responses.create(
         model=_CODEX_CHAT_MODEL,
         store=False,
+        stream=True,
         instructions=_CODEX_INSTRUCTIONS,
         input=[{
             "type": "message",
@@ -188,26 +228,28 @@ def _collect_image_b64(client: Any, *, prompt: str, size: str, quality: str) -> 
             "mode": "required",
             "tools": [{"type": "image_generation"}],
         },
-    ) as stream:
-        for event in stream:
-            event_type = getattr(event, "type", "")
-            if event_type == "response.output_item.done":
-                item = getattr(event, "item", None)
-                if getattr(item, "type", None) == "image_generation_call":
-                    result = getattr(item, "result", None)
-                    if isinstance(result, str) and result:
-                        image_b64 = result
-            elif event_type == "response.image_generation_call.partial_image":
-                partial = getattr(event, "partial_image_b64", None)
-                if isinstance(partial, str) and partial:
-                    image_b64 = partial
-        final = stream.get_final_response()
+    )
+
+    for event in _iter_raw_response_events(stream_or_response):
+        event_type = _obj_get(event, "type", "")
+        if event_type == "response.output_item.done":
+            item = _obj_get(event, "item")
+            if _obj_get(item, "type") == "image_generation_call":
+                result = _obj_get(item, "result")
+                if isinstance(result, str) and result:
+                    image_b64 = result
+        elif event_type == "response.image_generation_call.partial_image":
+            partial = _obj_get(event, "partial_image_b64")
+            if isinstance(partial, str) and partial:
+                image_b64 = partial
+        elif event_type in {"response.completed", "response.incomplete", "response.failed"}:
+            final_response = _obj_get(event, "response")
 
     # Final-response sweep covers the case where the stream finished before
     # we observed the ``output_item.done`` event for the image call.
-    for item in getattr(final, "output", None) or []:
-        if getattr(item, "type", None) == "image_generation_call":
-            result = getattr(item, "result", None)
+    for item in _obj_get(final_response, "output", []) or []:
+        if _obj_get(item, "type") == "image_generation_call":
+            result = _obj_get(item, "result")
             if isinstance(result, str) and result:
                 image_b64 = result
 

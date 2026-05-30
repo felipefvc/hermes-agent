@@ -66,6 +66,9 @@ plugins:
 video_analysis:
   include_comments: true
   comments_limit: 25
+  # Full-file STT is tried first. If the STT API fails, the tool retries
+  # using chunked audio; useful for local Whisper servers with length limits.
+  transcription_chunk_seconds: 60
   youtube:
     # Optional override. The tool automatically retries YouTube 403/bot
     # download failures with the android player client when unset.

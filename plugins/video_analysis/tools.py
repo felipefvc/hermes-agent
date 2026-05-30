@@ -52,6 +52,7 @@ DEFAULT_FRAME_INTERVAL_SECONDS = 10.0
 DEFAULT_MAX_FRAMES = 24
 DEFAULT_COMMENTS_LIMIT = 25
 DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
+DEFAULT_TRANSCRIPTION_CHUNK_SECONDS = 60
 MAX_DESCRIPTION_CHARS = 12000
 MAX_COMMENTS_CHARS = 16000
 MAX_TRANSCRIPT_PROMPT_CHARS = 30000
@@ -168,6 +169,7 @@ class VideoAnalysisConfig:
     cookies_file: str = ""
     cookies_from_browser: str = ""
     youtube_player_client: str = ""
+    transcription_chunk_seconds: int = DEFAULT_TRANSCRIPTION_CHUNK_SECONDS
 
 
 def check_video_analysis_requirements() -> bool:
@@ -210,7 +212,11 @@ class VideoAnalysisService:
 
         if summary_path.exists() and not refresh:
             cached = _read_json(summary_path, default={})
-            if isinstance(cached, dict) and cached.get("success"):
+            if (
+                isinstance(cached, dict)
+                and cached.get("success")
+                and not _cached_summary_has_failed_transcription(cached)
+            ):
                 cached["cached"] = True
                 _shape_transcript_fields(cached, return_transcript)
                 return cached
@@ -242,6 +248,7 @@ class VideoAnalysisService:
             transcript_path,
             refresh,
             warnings,
+            config.transcription_chunk_seconds,
         )
 
         frame_manifest = await asyncio.to_thread(
@@ -351,6 +358,12 @@ def _load_config(args: Dict[str, Any]) -> VideoAnalysisConfig:
             or os.getenv("HERMES_VIDEO_ANALYSIS_YOUTUBE_PLAYER_CLIENT")
             or ""
         ).strip(),
+        transcription_chunk_seconds=_coerce_int(
+            cfg.get("transcription_chunk_seconds"),
+            DEFAULT_TRANSCRIPTION_CHUNK_SECONDS,
+            10,
+            600,
+        ),
     )
 
 
@@ -548,10 +561,13 @@ def _transcribe_or_reuse(
     transcript_path: Path,
     refresh: bool,
     warnings: List[str],
+    chunk_seconds: int = DEFAULT_TRANSCRIPTION_CHUNK_SECONDS,
 ) -> Dict[str, Any]:
     cached = _read_json(transcript_path, default={})
-    if cached and not refresh:
+    if cached and cached.get("success") and not refresh:
         return cached
+    if cached and not refresh:
+        warnings.append("Ignoring cached failed transcript; retrying STT.")
 
     if not audio_path.exists() or refresh:
         try:
@@ -580,11 +596,109 @@ def _transcribe_or_reuse(
             "error": f"STT failed: {exc}",
             "provider": "",
         }
+    if not result.get("success"):
+        warnings.append(
+            "Full audio transcription failed; retrying in smaller audio chunks."
+        )
+        chunk_result = _transcribe_chunks(
+            video_path,
+            transcript_path.parent / "audio_chunks",
+            refresh,
+            max(10, int(chunk_seconds or DEFAULT_TRANSCRIPTION_CHUNK_SECONDS)),
+        )
+        if chunk_result.get("success"):
+            result = chunk_result
+        else:
+            result["chunked_error"] = chunk_result.get("error") or "chunked STT failed"
+
     result["audio_path"] = str(audio_path)
     result["transcribed_at"] = _utc_now()
     _write_json(transcript_path, result)
     if not result.get("success"):
         warnings.append(str(result.get("error") or "STT returned no transcript"))
+    return result
+
+
+def _transcribe_chunks(
+    video_path: Path,
+    chunks_dir: Path,
+    refresh: bool,
+    chunk_seconds: int,
+) -> Dict[str, Any]:
+    try:
+        chunks = _extract_audio_chunks(video_path, chunks_dir, refresh, chunk_seconds)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"Audio chunk extraction failed: {exc}",
+            "provider": "",
+        }
+    if not chunks:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "No audio chunks were produced for chunked STT fallback",
+            "provider": "",
+        }
+
+    try:
+        from tools.transcription_tools import transcribe_audio
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"STT unavailable for chunked transcription: {exc}",
+            "provider": "",
+        }
+
+    transcript_parts: List[str] = []
+    segments: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    provider = ""
+
+    for idx, chunk in enumerate(chunks):
+        result = transcribe_audio(str(chunk))
+        if not provider and result.get("provider"):
+            provider = str(result.get("provider"))
+        text = str(result.get("transcript") or "").strip()
+        if result.get("success") and text:
+            start = idx * chunk_seconds
+            duration = _probe_duration(chunk) or float(chunk_seconds)
+            end = start + duration
+            transcript_parts.append(text)
+            segments.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+                "chunk_path": str(chunk),
+            })
+        else:
+            errors.append(
+                f"{chunk.name}: {result.get('error') or 'empty transcript'}"
+            )
+
+    transcript = "\n\n".join(transcript_parts).strip()
+    if not transcript:
+        return {
+            "success": False,
+            "transcript": "",
+            "error": "Chunked STT fallback produced no transcript: " + "; ".join(errors),
+            "provider": provider,
+            "segments": [],
+        }
+
+    result: Dict[str, Any] = {
+        "success": True,
+        "transcript": transcript,
+        "provider": provider,
+        "segments": segments,
+        "chunks_dir": str(chunks_dir),
+        "chunk_seconds": chunk_seconds,
+        "chunk_count": len(chunks),
+    }
+    if errors:
+        result["warnings"] = errors
     return result
 
 
@@ -765,6 +879,54 @@ def _extract_audio(video_path: Path, audio_path: Path) -> None:
     if proc.returncode != 0 or not audio_path.exists():
         detail = (proc.stderr or proc.stdout or "unknown ffmpeg error").strip()
         raise RuntimeError(f"ffmpeg audio extraction failed: {detail}")
+
+
+def _extract_audio_chunks(
+    video_path: Path,
+    chunks_dir: Path,
+    refresh: bool,
+    chunk_seconds: int,
+) -> List[Path]:
+    existing = sorted(chunks_dir.glob("chunk_*.mp3"))
+    if existing and not refresh:
+        return existing
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg not found; cannot extract audio chunks")
+
+    if chunks_dir.exists():
+        shutil.rmtree(chunks_dir)
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-b:a",
+        "32k",
+        "-f",
+        "segment",
+        "-segment_time",
+        str(max(10, int(chunk_seconds))),
+        "-reset_timestamps",
+        "1",
+        "-loglevel",
+        "error",
+        str(chunks_dir / "chunk_%04d.mp3"),
+    ]
+    proc = subprocess.run(command, capture_output=True, text=True, timeout=600)
+    chunks = sorted(chunks_dir.glob("chunk_*.mp3"))
+    if proc.returncode != 0 or not chunks:
+        detail = (proc.stderr or proc.stdout or "unknown ffmpeg error").strip()
+        raise RuntimeError(f"ffmpeg audio chunk extraction failed: {detail}")
+    return chunks
 
 
 def _extract_frame(video_path: Path, output_path: Path, timestamp: float) -> None:
@@ -958,6 +1120,15 @@ def _shape_transcript_fields(result: Dict[str, Any], return_transcript: bool) ->
             result["transcript_excerpt"] = _truncate_middle(
                 str(cached.get("transcript") or ""), 4000,
             )
+
+
+def _cached_summary_has_failed_transcription(cached: Dict[str, Any]) -> bool:
+    transcription = cached.get("transcription")
+    return (
+        isinstance(transcription, dict)
+        and transcription.get("success") is False
+        and bool(transcription.get("error"))
+    )
 
 
 def _summary_prompt(

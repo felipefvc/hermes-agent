@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -150,6 +151,88 @@ def test_youtube_download_403_retries_with_android_player(tmp_path, monkeypatch)
     assert calls[1]["extractor_args"]["youtube"]["player_client"] == ["android"]
     assert calls[1]["extractor_args"]["youtube"]["max_comments"] == ["25"]
     assert "android player client fallback" in warnings[0]
+
+
+def test_failed_transcript_cache_retries_with_audio_chunks(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+    from tools import transcription_tools
+
+    video_path = tmp_path / "source.mp4"
+    audio_path = tmp_path / "audio.mp3"
+    transcript_path = tmp_path / "transcript.json"
+    video_path.write_bytes(b"video")
+    transcript_path.write_text(
+        json.dumps({"success": False, "transcript": "", "error": "old failure"}),
+        encoding="utf-8",
+    )
+
+    def fake_extract_audio(_video_path, out_path):
+        out_path.write_bytes(b"full audio")
+
+    def fake_extract_chunks(_video_path, chunks_dir, refresh, chunk_seconds):
+        assert refresh is False
+        assert chunk_seconds == 30
+        chunks_dir.mkdir(parents=True)
+        paths = []
+        for idx in range(2):
+            path = chunks_dir / f"chunk_{idx:04d}.mp3"
+            path.write_bytes(f"chunk {idx}".encode())
+            paths.append(path)
+        return paths
+
+    calls = []
+
+    def fake_transcribe(path):
+        calls.append(path)
+        if path.endswith("audio.mp3"):
+            return {"success": False, "transcript": "", "error": "API error: Internal Server Error"}
+        return {
+            "success": True,
+            "transcript": f"text from {Path(path).stem}",
+            "provider": "openai",
+        }
+
+    monkeypatch.setattr(tools, "_extract_audio", fake_extract_audio)
+    monkeypatch.setattr(tools, "_extract_audio_chunks", fake_extract_chunks)
+    monkeypatch.setattr(tools, "_probe_duration", lambda _path: 30.0)
+    monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe)
+
+    warnings = []
+    result = tools._transcribe_or_reuse(
+        video_path,
+        audio_path,
+        transcript_path,
+        False,
+        warnings,
+        30,
+    )
+
+    assert result["success"] is True
+    assert result["provider"] == "openai"
+    assert result["transcript"] == "text from chunk_0000\n\ntext from chunk_0001"
+    assert result["segments"][0]["start"] == 0
+    assert result["segments"][0]["end"] == 30
+    assert result["segments"][1]["start"] == 30
+    assert "Ignoring cached failed transcript" in warnings[0]
+    assert "Full audio transcription failed" in warnings[1]
+    assert calls[0].endswith("audio.mp3")
+    assert calls[1].endswith("chunk_0000.mp3")
+
+
+def test_cached_summary_with_failed_transcription_is_not_reused():
+    from plugins.video_analysis.tools import _cached_summary_has_failed_transcription
+
+    assert _cached_summary_has_failed_transcription({
+        "success": True,
+        "transcription": {
+            "success": False,
+            "error": "API error: Internal Server Error",
+        },
+    })
+    assert not _cached_summary_has_failed_transcription({
+        "success": True,
+        "transcription": {"success": True, "error": ""},
+    })
 
 
 @pytest.mark.asyncio

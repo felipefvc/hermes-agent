@@ -66,6 +66,10 @@ plugins:
 video_analysis:
   include_comments: true
   comments_limit: 25
+  youtube:
+    # Optional override. The tool automatically retries YouTube 403/bot
+    # download failures with the android player client when unset.
+    # player_client: "android"
   cookies_file: "/path/to/cookies.txt"
   # cookies_from_browser: "chrome"
   frames:

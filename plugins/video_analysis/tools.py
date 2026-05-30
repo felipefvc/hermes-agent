@@ -38,6 +38,7 @@ DEFAULT_FRAME_MODE = "count"
 DEFAULT_FRAME_INTERVAL_SECONDS = 10.0
 DEFAULT_MAX_FRAMES = 24
 DEFAULT_COMMENTS_LIMIT = 25
+DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 MAX_DESCRIPTION_CHARS = 12000
 MAX_COMMENTS_CHARS = 16000
 MAX_TRANSCRIPT_PROMPT_CHARS = 30000
@@ -153,6 +154,7 @@ class VideoAnalysisConfig:
     comments_limit: int = DEFAULT_COMMENTS_LIMIT
     cookies_file: str = ""
     cookies_from_browser: str = ""
+    youtube_player_client: str = ""
 
 
 def check_video_analysis_requirements() -> bool:
@@ -308,6 +310,7 @@ def _load_config(args: Dict[str, Any]) -> VideoAnalysisConfig:
         cfg = {}
 
     frames_cfg = cfg.get("frames") if isinstance(cfg.get("frames"), dict) else {}
+    youtube_cfg = cfg.get("youtube") if isinstance(cfg.get("youtube"), dict) else {}
     cache_dir_raw = cfg.get("cache_dir") or os.getenv("HERMES_VIDEO_ANALYSIS_CACHE_DIR")
     cache_dir = Path(cache_dir_raw).expanduser() if cache_dir_raw else get_hermes_home() / "cache" / "video_analysis"
 
@@ -329,6 +332,12 @@ def _load_config(args: Dict[str, Any]) -> VideoAnalysisConfig:
         comments_limit=_coerce_int(args.get("comments_limit") or cfg.get("comments_limit"), DEFAULT_COMMENTS_LIMIT, 0, 500),
         cookies_file=str(cfg.get("cookies_file") or os.getenv("HERMES_VIDEO_ANALYSIS_COOKIES_FILE") or ""),
         cookies_from_browser=str(cfg.get("cookies_from_browser") or os.getenv("HERMES_VIDEO_ANALYSIS_COOKIES_FROM_BROWSER") or ""),
+        youtube_player_client=str(
+            youtube_cfg.get("player_client")
+            or cfg.get("youtube_player_client")
+            or os.getenv("HERMES_VIDEO_ANALYSIS_YOUTUBE_PLAYER_CLIENT")
+            or ""
+        ).strip(),
     )
 
 
@@ -369,46 +378,53 @@ def _download_or_reuse_video(
         }
 
     yt_dlp = _ensure_yt_dlp()
-    ydl_opts: Dict[str, Any] = {
-        "format": "bv*+ba/bestvideo+bestaudio/best",
-        "merge_output_format": "mp4",
-        "outtmpl": str(cache_dir / "source.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "continuedl": True,
-        "retries": 3,
-        "fragment_retries": 3,
-        "overwrites": bool(refresh),
-    }
     if refresh:
-        for stale in cache_dir.glob("source.*"):
-            if stale.is_file():
-                stale.unlink(missing_ok=True)
-    if config.cookies_file:
-        ydl_opts["cookiefile"] = config.cookies_file
-    if config.cookies_from_browser:
-        ydl_opts["cookiesfrombrowser"] = (config.cookies_from_browser, None, None, None)
-    if config.include_comments:
-        ydl_opts["getcomments"] = True
-        if config.comments_limit > 0:
-            ydl_opts["extractor_args"] = {
-                "youtube": {"max_comments": [str(config.comments_limit)]}
-            }
+        _delete_source_downloads(cache_dir)
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(_build_ytdlp_opts(cache_dir, config, refresh)) as ydl:
             info = ydl.extract_info(url, download=True)
     except Exception as exc:  # noqa: BLE001
-        return _error(
-            f"yt-dlp could not download this URL: {exc}",
-            source_url=url,
-            cache_dir=str(cache_dir),
-        )
+        if _should_retry_youtube_with_android(url, exc, config):
+            warnings.append(
+                "Initial YouTube download failed; retried with yt-dlp's "
+                "android player client fallback."
+            )
+            _delete_source_downloads(cache_dir)
+            try:
+                fallback_opts = _build_ytdlp_opts(
+                    cache_dir,
+                    config,
+                    refresh,
+                    youtube_player_client=DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT,
+                )
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+            except Exception as fallback_exc:  # noqa: BLE001
+                return _error(
+                    (
+                        "yt-dlp could not download this URL after YouTube "
+                        f"fallback: {fallback_exc} (initial error: {exc})"
+                    ),
+                    source_url=url,
+                    cache_dir=str(cache_dir),
+                    warnings=warnings,
+                )
+        else:
+            return _error(
+                f"yt-dlp could not download this URL: {exc}",
+                source_url=url,
+                cache_dir=str(cache_dir),
+                warnings=warnings,
+            )
 
     video_path = _find_downloaded_video(cache_dir)
     if video_path is None:
-        return _error("yt-dlp completed but no downloaded video file was found", cache_dir=str(cache_dir))
+        return _error(
+            "yt-dlp completed but no downloaded video file was found",
+            cache_dir=str(cache_dir),
+            warnings=warnings,
+        )
 
     metadata = _compact_metadata(info or {}, config.comments_limit)
     if not metadata.get("comments") and config.include_comments:
@@ -432,6 +448,83 @@ def _download_or_reuse_video(
         "metadata": metadata,
         "manifest": manifest,
     }
+
+
+def _build_ytdlp_opts(
+    cache_dir: Path,
+    config: VideoAnalysisConfig,
+    refresh: bool,
+    *,
+    youtube_player_client: str = "",
+) -> Dict[str, Any]:
+    ydl_opts: Dict[str, Any] = {
+        "format": "bv*+ba/bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "outtmpl": str(cache_dir / "source.%(ext)s"),
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "continuedl": True,
+        "retries": 3,
+        "fragment_retries": 3,
+        "overwrites": bool(refresh),
+    }
+    if config.cookies_file:
+        ydl_opts["cookiefile"] = config.cookies_file
+    if config.cookies_from_browser:
+        ydl_opts["cookiesfrombrowser"] = (config.cookies_from_browser, None, None, None)
+    if config.include_comments:
+        ydl_opts["getcomments"] = True
+
+    extractor_args: Dict[str, Dict[str, List[str]]] = {}
+    if config.include_comments and config.comments_limit > 0:
+        extractor_args.setdefault("youtube", {})["max_comments"] = [str(config.comments_limit)]
+
+    player_client = (
+        youtube_player_client
+        or config.youtube_player_client
+        or ""
+    ).strip()
+    if player_client:
+        extractor_args.setdefault("youtube", {})["player_client"] = [player_client]
+
+    if extractor_args:
+        ydl_opts["extractor_args"] = extractor_args
+    return ydl_opts
+
+
+def _should_retry_youtube_with_android(
+    url: str,
+    exc: Exception,
+    config: VideoAnalysisConfig,
+) -> bool:
+    if not _is_youtube_url(url):
+        return False
+    if config.youtube_player_client.strip().lower() == DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT:
+        return False
+    message = str(exc).lower()
+    retry_markers = (
+        "http error 403",
+        "sign in to confirm",
+        "not a bot",
+        "sabr",
+        "po token",
+    )
+    return any(marker in message for marker in retry_markers)
+
+
+def _is_youtube_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return (
+        host in {"youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com"}
+        or host.endswith(".youtube.com")
+    )
+
+
+def _delete_source_downloads(cache_dir: Path) -> None:
+    for stale in cache_dir.glob("source.*"):
+        if stale.is_file():
+            stale.unlink(missing_ok=True)
 
 
 def _transcribe_or_reuse(

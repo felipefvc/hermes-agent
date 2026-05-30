@@ -106,6 +106,52 @@ def test_compact_metadata_limits_description_and_comments():
     assert metadata["comments_captured"] == 2
 
 
+def test_youtube_download_403_retries_with_android_player(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+
+    calls = []
+    url = "https://youtu.be/abc12345678"
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+            calls.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, _url, download):
+            assert download is True
+            if len(calls) == 1:
+                raise RuntimeError("HTTP Error 403: Forbidden")
+            (tmp_path / "source.mp4").write_bytes(b"video")
+            return {"title": "ok", "webpage_url": url}
+
+    class FakeYtDlp:
+        YoutubeDL = FakeYDL
+
+    monkeypatch.setattr(tools, "_ensure_yt_dlp", lambda: FakeYtDlp)
+
+    warnings = []
+    result = tools._download_or_reuse_video(
+        url,
+        tmp_path,
+        tools.VideoAnalysisConfig(cache_dir=tmp_path),
+        False,
+        warnings,
+    )
+
+    assert result["success"] is True
+    assert len(calls) == 2
+    assert calls[0]["extractor_args"]["youtube"].get("player_client") is None
+    assert calls[1]["extractor_args"]["youtube"]["player_client"] == ["android"]
+    assert calls[1]["extractor_args"]["youtube"]["max_comments"] == ["25"]
+    assert "android player client fallback" in warnings[0]
+
+
 @pytest.mark.asyncio
 async def test_cached_summary_short_circuits_processing(tmp_path, monkeypatch):
     from plugins.video_analysis import tools

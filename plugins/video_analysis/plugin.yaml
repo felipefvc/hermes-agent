@@ -1,0 +1,7 @@
+name: video_analysis
+version: 0.1.0
+description: "Download social videos, cache media/transcripts/frames, analyze sampled frames with Hermes vision, and summarize the video."
+author: Hermes Agent
+kind: standalone
+provides_tools:
+  - video_analyze

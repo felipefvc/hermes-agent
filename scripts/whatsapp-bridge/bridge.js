@@ -629,7 +629,7 @@ app.post('/send-media', async (req, res) => {
           tmpPath = path.join(tmpdir(), `hermes_voice_${randomBytes(6).toString('hex')}.ogg`);
           try {
             execSync(
-              `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
+              `ffmpeg -y -i ${JSON.stringify(filePath)} -af apad=pad_dur=0.6 -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
               { timeout: 30000, stdio: 'pipe' }
             );
             audioBuffer = readFileSync(tmpPath);

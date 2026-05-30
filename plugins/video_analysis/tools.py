@@ -42,10 +42,11 @@ MAX_DESCRIPTION_CHARS = 12000
 MAX_COMMENTS_CHARS = 16000
 MAX_TRANSCRIPT_PROMPT_CHARS = 30000
 MAX_FRAME_ANALYSIS_PROMPT_CHARS = 16000
+VIDEO_ANALYSIS_TOOL_NAME = "video_download_analyze"
 
 
 VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
-    "name": "video_analyze",
+    "name": VIDEO_ANALYSIS_TOOL_NAME,
     "description": (
         "Download and analyze a video URL from YouTube, Facebook, Instagram, "
         "X/Twitter, or another yt-dlp-supported site. Caches the video, "
@@ -160,14 +161,14 @@ def check_video_analysis_requirements() -> bool:
 
 
 class VideoAnalysisService:
-    """State-light orchestrator for the ``video_analyze`` plugin tool."""
+    """State-light orchestrator for the ``video_download_analyze`` plugin tool."""
 
     async def handle(self, args: Dict[str, Any], **_kwargs: Any) -> str:
         """Tool handler. Returns a JSON string for the agent loop."""
         try:
             result = await self.analyze(args)
         except Exception as exc:  # noqa: BLE001 - plugin tools must not leak
-            logger.warning("video_analyze failed: %s", exc, exc_info=True)
+            logger.warning("%s failed: %s", VIDEO_ANALYSIS_TOOL_NAME, exc, exc_info=True)
             result = {"success": False, "error": str(exc)}
         return json.dumps(result, ensure_ascii=False, indent=2)
 

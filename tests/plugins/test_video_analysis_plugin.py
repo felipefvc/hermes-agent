@@ -19,7 +19,7 @@ def test_register_wires_tool_and_aux_task():
 
     assert calls["aux"][0]["key"] == "video_analysis"
     tool = calls["tools"][0]
-    assert tool["name"] == "video_analyze"
+    assert tool["name"] == "video_download_analyze"
     assert tool["toolset"] == "video_analysis"
     assert tool["is_async"] is True
 

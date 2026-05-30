@@ -1,6 +1,6 @@
 """Video analysis plugin.
 
-Adds one agent-facing tool, ``video_analyze``, for downloading and analyzing
+Adds one agent-facing tool, ``video_download_analyze``, for downloading and analyzing
 videos from YouTube, Facebook, Instagram, X/Twitter, and other yt-dlp-backed
 sites.
 """
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from plugins.video_analysis.tools import (
     VIDEO_ANALYZE_SCHEMA,
+    VIDEO_ANALYSIS_TOOL_NAME,
     VideoAnalysisService,
     check_video_analysis_requirements,
 )
@@ -30,7 +31,7 @@ def register(ctx) -> None:
     )
     service = VideoAnalysisService()
     ctx.register_tool(
-        name="video_analyze",
+        name=VIDEO_ANALYSIS_TOOL_NAME,
         toolset="video_analysis",
         schema=VIDEO_ANALYZE_SCHEMA,
         handler=service.handle,

@@ -4,4 +4,4 @@ description: "Download social videos, cache media/transcripts/frames, analyze sa
 author: Hermes Agent
 kind: standalone
 provides_tools:
-  - video_analyze
+  - video_download_analyze

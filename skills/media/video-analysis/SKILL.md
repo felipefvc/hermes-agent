@@ -18,7 +18,7 @@ Use when the user shares a video URL and asks what it says, shows, claims, summa
 
 ## Tool
 
-Call `video_analyze` with the URL. The tool downloads the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, summarizes the surrounding metadata/comments, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
+Call `video_download_analyze` with the URL. The tool downloads the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, summarizes the surrounding metadata/comments, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
 
 Default frame sampling is 5 evenly spaced frames:
 

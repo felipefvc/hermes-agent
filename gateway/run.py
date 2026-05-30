@@ -1549,14 +1549,14 @@ def _load_gateway_config() -> dict:
 
 
 def _gateway_profile_debug_route_for_source(source: Any) -> Dict[str, str]:
-    """Resolve a bound gateway profile's debug target from gateway_profiles.yaml.
+    """Resolve a gateway profile debug target from gateway_profiles.yaml.
 
     Gateway profile hooks normally stamp ``event.metadata.gateway_profiles``
-    before dispatch. Resumed/interrupted group turns can arrive without that
+    before dispatch. Resumed/interrupted turns can arrive without that
     metadata, so use the persistent binding as a privacy fallback instead of
-    letting tool progress fall back to the originating group.
+    letting tool progress fall back to the originating chat.
     """
-    if not source or str(getattr(source, "chat_type", "") or "").lower() != "group":
+    if not source:
         return {}
 
     profiles_path = _hermes_home / "gateway_profiles.yaml"
@@ -1605,13 +1605,21 @@ def _gateway_profile_debug_route_for_source(source: Any) -> Dict[str, str]:
         matched_profile_name = str(binding.get("profile", "") or "")
         break
 
+    if (
+        not matched_profile_name
+        and source_chat_type in {"", "dm", "direct", "private"}
+    ):
+        matched_profile_name = str(config.get("default_profile") or "default")
+
     if not matched_profile_name:
         return {}
 
     profiles = config.get("profiles") if isinstance(config.get("profiles"), dict) else {}
+    defaults = config.get("defaults") if isinstance(config.get("defaults"), dict) else {}
     profile = profiles.get(matched_profile_name)
     if not isinstance(profile, dict):
-        return {}
+        profile = {}
+    profile = {**defaults, **profile}
 
     route: Dict[str, str] = {}
     debug_chat_id = profile.get("debug_chat_id") or profile.get("admin_debug_chat_id")
@@ -16157,7 +16165,7 @@ class GatewayRunner:
                 _debug_chat_id = str(_gateway_profile_meta.get("debug_chat_id") or "").strip()
         _debug_platform = source.platform
         _debug_route_error = False
-        if _debug_chat_id and getattr(source, "chat_type", "") == "group":
+        if _debug_chat_id:
             _debug_platform_name = str(_gateway_profile_meta.get("debug_platform") or "").strip().lower()
             if _debug_platform_name:
                 try:
@@ -16169,8 +16177,6 @@ class GatewayRunner:
                     )
                     _debug_route_error = True
                     _debug_chat_id = ""
-        else:
-            _debug_chat_id = ""
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))

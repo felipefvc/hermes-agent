@@ -33,6 +33,19 @@ from tools.url_safety import is_safe_url
 logger = logging.getLogger(__name__)
 
 
+class _QuietYtDlpLogger:
+    """Keep yt-dlp retries from writing expected fallback noise to stderr."""
+
+    def debug(self, msg: str) -> None:
+        logger.debug("yt-dlp: %s", msg)
+
+    def warning(self, msg: str) -> None:
+        logger.debug("yt-dlp warning: %s", msg)
+
+    def error(self, msg: str) -> None:
+        logger.debug("yt-dlp error: %s", msg)
+
+
 DEFAULT_FRAME_COUNT = 5
 DEFAULT_FRAME_MODE = "count"
 DEFAULT_FRAME_INTERVAL_SECONDS = 10.0
@@ -464,6 +477,8 @@ def _build_ytdlp_opts(
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
+        "logger": _QuietYtDlpLogger(),
         "continuedl": True,
         "retries": 3,
         "fragment_retries": 3,

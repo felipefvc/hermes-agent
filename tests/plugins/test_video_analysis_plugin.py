@@ -413,3 +413,5 @@ def test_summary_prompt_includes_surrounding_context():
     assert "spoken words" in prompt
     assert "a chart is visible" in prompt
     assert "What is the claim?" in prompt
+    assert "1-2 short paragraphs" in prompt
+    assert "Do not use headings" in prompt

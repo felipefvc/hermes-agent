@@ -1051,7 +1051,8 @@ async def _summarize_video(
             "content": (
                 "You analyze videos from transcript, sampled frames, and social "
                 "metadata. Be faithful to the evidence; distinguish what is "
-                "seen, what is said, and what surrounding metadata/comments imply."
+                "seen, what is said, and what surrounding metadata/comments imply. "
+                "Default to short chat-ready answers."
             ),
         },
         {"role": "user", "content": prompt},
@@ -1406,9 +1407,11 @@ def _summary_prompt(
         f"{_truncate_middle(transcript, MAX_TRANSCRIPT_PROMPT_CHARS) or '(no transcript available)'}\n\n"
         f"Sampled frame analyses:\n"
         f"{_truncate_middle(frames_text, MAX_FRAME_ANALYSIS_PROMPT_CHARS) or '(no frame analyses available)'}\n\n"
-        "Write the answer with these sections: Summary, Key points, Visual evidence, "
-        "Transcript/audio evidence, Metadata/comments context, Caveats. If the "
-        "user asked a specific question, answer it first."
+        "Write the answer for a messaging chat in only 1-2 short paragraphs. "
+        "Do not use headings, bullets, or separate evidence sections unless the "
+        "user explicitly asks for a detailed breakdown. If the user asked a "
+        "specific question, answer it first, then add only the most important "
+        "context from the transcript, frames, and metadata/comments."
     )
 
 

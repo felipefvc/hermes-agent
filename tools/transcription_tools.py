@@ -261,6 +261,20 @@ DEFAULT_COMMAND_STT_TIMEOUT_SECONDS = 300
 DEFAULT_COMMAND_STT_LANGUAGE = "en"
 DEFAULT_COMMAND_STT_OUTPUT_FORMAT = "txt"
 COMMAND_STT_OUTPUT_FORMATS = frozenset({"txt", "json", "srt", "vtt"})
+AUTO_LANGUAGE_VALUES = frozenset({"", "auto", "detect", "detected", "source", "video"})
+
+
+def _is_auto_language(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in AUTO_LANGUAGE_VALUES
+
+
+def _language_override_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if _is_auto_language(text):
+        return ""
+    return text
 
 
 def _get_stt_section(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
@@ -611,6 +625,7 @@ def _transcribe_command_stt(
     config: Dict[str, Any],
     stt_config: Dict[str, Any],
     model_override: Optional[str] = None,
+    language_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
@@ -651,11 +666,14 @@ def _transcribe_command_stt(
 
     timeout = _get_command_stt_timeout(config)
     output_format = _get_command_stt_output_format(config)
-    language = (
-        config.get("language")
-        or stt_config.get("language")
-        or DEFAULT_COMMAND_STT_LANGUAGE
-    )
+    if language_override is not None:
+        language = _language_override_value(language_override) or ""
+    else:
+        language = (
+            config.get("language")
+            or stt_config.get("language")
+            or DEFAULT_COMMAND_STT_LANGUAGE
+        )
     model = model_override or config.get("model") or ""
 
     try:
@@ -1092,7 +1110,7 @@ def _load_local_whisper_model(model_name: str):
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
-def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using faster-whisper (local, free)."""
     global _local_model, _local_model_name
 
@@ -1108,11 +1126,14 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
             _local_model_name = model_name
 
         # Language: config.yaml (stt.local.language) > env var > auto-detect.
-        _forced_lang = (
-            _load_stt_config().get("local", {}).get("language")
-            or os.getenv(LOCAL_STT_LANGUAGE_ENV)
-            or None
-        )
+        if language is not None:
+            _forced_lang = _language_override_value(language)
+        else:
+            _forced_lang = (
+                _load_stt_config().get("local", {}).get("language")
+                or os.getenv(LOCAL_STT_LANGUAGE_ENV)
+                or None
+            )
         transcribe_kwargs = {"beam_size": 5}
         if _forced_lang:
             transcribe_kwargs["language"] = _forced_lang
@@ -1146,7 +1167,12 @@ def _transcribe_local(file_path: str, model_name: str) -> Dict[str, Any]:
             Path(file_path).name, model_name, info.language, info.duration,
         )
 
-        return {"success": True, "transcript": transcript, "provider": "local"}
+        return {
+            "success": True,
+            "transcript": transcript,
+            "provider": "local",
+            "language": getattr(info, "language", "") or "",
+        }
 
     except Exception as e:
         logger.error("Local transcription failed: %s", e, exc_info=True)
@@ -1175,7 +1201,7 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
         return None, f"Failed to convert audio for local STT: {details}"
 
 
-def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local_command(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     command_template = _get_local_command_template()
     if not command_template:
@@ -1188,12 +1214,17 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
         }
 
     # Language: config.yaml (stt.local.language) > env var > "en" default.
-    language = (
-        _load_stt_config().get("local", {}).get("language")
-        or os.getenv(LOCAL_STT_LANGUAGE_ENV)
-        or DEFAULT_LOCAL_STT_LANGUAGE
-    )
+    if language is not None:
+        language = _language_override_value(language) or ""
+    else:
+        language = (
+            _load_stt_config().get("local", {}).get("language")
+            or os.getenv(LOCAL_STT_LANGUAGE_ENV)
+            or DEFAULT_LOCAL_STT_LANGUAGE
+        )
     normalized_model = _normalize_local_command_model(model_name)
+    if not language and not os.getenv(LOCAL_STT_COMMAND_ENV, "").strip():
+        command_template = command_template.replace(" --language {language}", "")
 
     try:
         with tempfile.TemporaryDirectory(prefix="hermes-local-stt-") as output_dir:
@@ -1230,7 +1261,12 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
                 normalized_model,
                 len(transcript_text),
             )
-            return {"success": True, "transcript": transcript_text, "provider": "local_command"}
+            return {
+                "success": True,
+                "transcript": transcript_text,
+                "provider": "local_command",
+                "language": language,
+            }
 
     except KeyError as e:
         return {
@@ -1251,7 +1287,7 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_groq(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using Groq Whisper API (free tier available)."""
     api_key = get_env_value("GROQ_API_KEY")
     if not api_key:
@@ -1270,17 +1306,26 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
         client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL, timeout=30, max_retries=0)
         try:
             with open(file_path, "rb") as audio_file:
-                transcription = client.audio.transcriptions.create(
-                    model=model_name,
-                    file=audio_file,
-                    response_format="text",
-                )
+                create_kwargs = {
+                    "model": model_name,
+                    "file": audio_file,
+                    "response_format": "text",
+                }
+                lang_value = _language_override_value(language)
+                if lang_value:
+                    create_kwargs["language"] = lang_value
+                transcription = client.audio.transcriptions.create(**create_kwargs)
 
             transcript_text = str(transcription).strip()
             logger.info("Transcribed %s via Groq API (%s, %d chars)",
                          Path(file_path).name, model_name, len(transcript_text))
 
-            return {"success": True, "transcript": transcript_text, "provider": "groq"}
+            return {
+                "success": True,
+                "transcript": transcript_text,
+                "provider": "groq",
+                "language": _language_override_value(language) or "",
+            }
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1303,7 +1348,7 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_openai(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using OpenAI Whisper API (paid)."""
     try:
         api_key, base_url = _resolve_openai_audio_client_config()
@@ -1328,24 +1373,33 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
         try:
             stt_config = _load_stt_config()
             openai_config = stt_config.get("openai", {}) if isinstance(stt_config, dict) else {}
-            language = str(
-                openai_config.get("language") or stt_config.get("language") or ""
-            ).strip()
+            if language is not None:
+                request_language = _language_override_value(language) or ""
+            else:
+                request_language = str(
+                    openai_config.get("language") or stt_config.get("language") or ""
+                ).strip()
             with open(file_path, "rb") as audio_file:
                 create_kwargs = {
                     "model": model_name,
                     "file": audio_file,
                     "response_format": "text" if model_name == "whisper-1" else "json",
                 }
-                if language:
-                    create_kwargs["language"] = language
+                if request_language:
+                    create_kwargs["language"] = request_language
                 transcription = client.audio.transcriptions.create(**create_kwargs)
 
             transcript_text = _extract_transcript_text(transcription)
+            detected_language = _extract_transcript_language(transcription) or request_language
             logger.info("Transcribed %s via OpenAI API (%s, %d chars)",
                          Path(file_path).name, model_name, len(transcript_text))
 
-            return {"success": True, "transcript": transcript_text, "provider": "openai"}
+            return {
+                "success": True,
+                "transcript": transcript_text,
+                "provider": "openai",
+                "language": detected_language,
+            }
         finally:
             close = getattr(client, "close", None)
             if callable(close):
@@ -1368,7 +1422,7 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_mistral(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using Mistral Voxtral Transcribe API.
 
     Uses the ``mistralai`` Python SDK to call ``/v1/audio/transcriptions``.
@@ -1393,7 +1447,13 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
                 "Transcribed %s via Mistral API (%s, %d chars)",
                 Path(file_path).name, model_name, len(transcript_text),
             )
-            return {"success": True, "transcript": transcript_text, "provider": "mistral"}
+            detected_language = _extract_transcript_language(result) or _language_override_value(language) or ""
+            return {
+                "success": True,
+                "transcript": transcript_text,
+                "provider": "mistral",
+                "language": detected_language,
+            }
 
     except PermissionError:
         return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
@@ -1407,7 +1467,7 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_xai(file_path: str, model_name: str, language: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using xAI Grok STT API.
 
     Uses the ``POST /v1/stt`` REST endpoint with multipart/form-data.
@@ -1433,11 +1493,14 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
         or creds.get("base_url")
         or XAI_STT_BASE_URL
     ).strip().rstrip("/")
-    language = str(
-        xai_config.get("language")
-        or os.getenv("HERMES_LOCAL_STT_LANGUAGE")
-        or DEFAULT_LOCAL_STT_LANGUAGE
-    ).strip()
+    if language is not None:
+        language = _language_override_value(language) or ""
+    else:
+        language = str(
+            xai_config.get("language")
+            or os.getenv("HERMES_LOCAL_STT_LANGUAGE")
+            or DEFAULT_LOCAL_STT_LANGUAGE
+        ).strip()
     # .get("format", True) already defaults to True when the key is absent;
     # is_truthy_value only normalizes truthy/falsy strings from config.
     use_format = is_truthy_value(xai_config.get("format", True))
@@ -1500,7 +1563,12 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
             len(transcript_text),
         )
 
-        return {"success": True, "transcript": transcript_text, "provider": "xai"}
+        return {
+            "success": True,
+            "transcript": transcript_text,
+            "provider": "xai",
+            "language": result.get("language", language) or "",
+        }
 
     except PermissionError:
         return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
@@ -1514,7 +1582,11 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    language: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -1525,6 +1597,8 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
+        language:  Optional language override. Use "auto" to omit a forced
+                   language and let the STT provider detect the source language.
 
     Returns:
         dict with keys:
@@ -1554,33 +1628,33 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = _normalize_local_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local(file_path, model_name)
+        return _transcribe_local(file_path, model_name, language=language)
 
     if provider == "local_command":
         local_cfg = stt_config.get("local", {})
         model_name = _normalize_local_command_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local_command(file_path, model_name)
+        return _transcribe_local_command(file_path, model_name, language=language)
 
     if provider == "groq":
         model_name = model or DEFAULT_GROQ_STT_MODEL
-        return _transcribe_groq(file_path, model_name)
+        return _transcribe_groq(file_path, model_name, language=language)
 
     if provider == "openai":
         openai_cfg = stt_config.get("openai", {})
         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
-        return _transcribe_openai(file_path, model_name)
+        return _transcribe_openai(file_path, model_name, language=language)
 
     if provider == "mistral":
         mistral_cfg = stt_config.get("mistral", {})
         model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
-        return _transcribe_mistral(file_path, model_name)
+        return _transcribe_mistral(file_path, model_name, language=language)
 
     if provider == "xai":
         # xAI Grok STT doesn't use a model parameter — pass through for logging
         model_name = model or "grok-stt"
-        return _transcribe_xai(file_path, model_name)
+        return _transcribe_xai(file_path, model_name, language=language)
 
     # User-declared command-type provider
     # (``stt.providers.<name>: type: command``). Fires after the built-in
@@ -1596,6 +1670,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             command_provider_config,
             stt_config,
             model_override=model,
+            language_override=language,
         )
 
     # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
@@ -1612,7 +1687,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     # forwards ``language`` from there. Top-level ``model`` argument
     # overrides any config-set model.
     plugin_cfg = stt_config.get(provider, {}) if isinstance(stt_config.get(provider), dict) else {}
-    plugin_language = plugin_cfg.get("language")
+    plugin_language = _language_override_value(language) if language is not None else plugin_cfg.get("language")
     plugin_model = model or plugin_cfg.get("model")
     plugin_result = _dispatch_to_plugin_provider(
         file_path,
@@ -1684,3 +1759,19 @@ def _extract_transcript_text(transcription: Any) -> str:
             return value.strip()
 
     return str(transcription).strip()
+
+
+def _extract_transcript_language(transcription: Any) -> str:
+    """Best-effort language extraction from provider response objects."""
+    if hasattr(transcription, "language"):
+        value = getattr(transcription, "language")
+        if isinstance(value, str):
+            return value.strip()
+
+    if isinstance(transcription, dict):
+        for key in ("language", "detected_language", "source_language"):
+            value = transcription.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+    return ""

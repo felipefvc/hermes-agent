@@ -20,7 +20,7 @@ Use when the user shares a video URL or direct video attachment and asks what it
 
 Call `video_download_analyze` with either `url` or `video_path`. The tool downloads or ingests the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, builds a structured understanding of the transcript/frames/metadata/comments, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
 
-When relaying the result back to a messaging chat, normally send only `brief_summary` or a short adaptation of it. Use `detailed_summary`, `key_points`, `visual_evidence`, `transcript_evidence`, and `metadata_comments_context` only when the user asks for details, evidence, fact-checking, or a breakdown.
+The tool transcribes and summarizes in the video's source language by default. When relaying the result back to a messaging chat, normally send only `brief_summary` or a short adaptation of it in the language that best fits the chat, usually the language recently used there. Use `detailed_summary`, `key_points`, `visual_evidence`, `transcript_evidence`, and `metadata_comments_context` only when the user asks for details, evidence, fact-checking, or a breakdown.
 
 Default frame sampling is 5 evenly spaced frames:
 
@@ -77,6 +77,8 @@ video_analysis:
   # Full-file STT is tried first. If the STT API fails, the tool retries
   # using chunked audio; useful for local Whisper servers with length limits.
   transcription_chunk_seconds: 60
+  # auto means do not force a language; let STT detect the video's spoken language.
+  transcription_language: auto
   youtube:
     # Optional override. The tool automatically retries YouTube 403/bot
     # download failures with the android player client when unset.

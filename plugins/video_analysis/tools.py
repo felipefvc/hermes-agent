@@ -53,7 +53,8 @@ DEFAULT_MAX_FRAMES = 24
 DEFAULT_COMMENTS_LIMIT = 25
 DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 DEFAULT_TRANSCRIPTION_CHUNK_SECONDS = 60
-VIDEO_SUMMARY_SCHEMA_VERSION = 2
+DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE = "auto"
+VIDEO_SUMMARY_SCHEMA_VERSION = 3
 LOCAL_VIDEO_EXTENSIONS = {
     ".mp4",
     ".m4v",
@@ -180,6 +181,15 @@ VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
                     "false; transcript_path is always returned."
                 ),
             },
+            "transcription_language": {
+                "type": "string",
+                "description": (
+                    "Optional STT language override. Default auto omits a "
+                    "forced language so the transcript stays in the video's "
+                    "spoken language. Use an ISO language code only when you "
+                    "need to force one."
+                ),
+            },
         },
         "required": [],
         "additionalProperties": False,
@@ -200,6 +210,7 @@ class VideoAnalysisConfig:
     cookies_from_browser: str = ""
     youtube_player_client: str = ""
     transcription_chunk_seconds: int = DEFAULT_TRANSCRIPTION_CHUNK_SECONDS
+    transcription_language: str = DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE
 
 
 def check_video_analysis_requirements() -> bool:
@@ -312,6 +323,7 @@ class VideoAnalysisService:
             refresh,
             warnings,
             config.transcription_chunk_seconds,
+            config.transcription_language,
         )
 
         frame_manifest = await asyncio.to_thread(
@@ -375,6 +387,8 @@ class VideoAnalysisService:
             "frames": frame_analyses,
             "transcription": _public_transcription(transcription),
             "summary_schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+            "source_language": video_understanding.get("detected_language") or "",
+            "detected_language": video_understanding.get("detected_language") or "",
             "summary": brief_summary,
             "brief_summary": brief_summary,
             "detailed_summary": detailed_summary,
@@ -445,6 +459,12 @@ def _load_config(args: Dict[str, Any]) -> VideoAnalysisConfig:
             10,
             600,
         ),
+        transcription_language=str(
+            args.get("transcription_language")
+            or cfg.get("transcription_language")
+            or os.getenv("HERMES_VIDEO_ANALYSIS_TRANSCRIPTION_LANGUAGE")
+            or DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE
+        ).strip(),
     )
 
 
@@ -808,6 +828,7 @@ def _transcribe_or_reuse(
     refresh: bool,
     warnings: List[str],
     chunk_seconds: int = DEFAULT_TRANSCRIPTION_CHUNK_SECONDS,
+    transcription_language: str = DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE,
 ) -> Dict[str, Any]:
     cached = _read_json(transcript_path, default={})
     if cached and cached.get("success") and not refresh:
@@ -834,7 +855,7 @@ def _transcribe_or_reuse(
     try:
         from tools.transcription_tools import transcribe_audio
 
-        result = transcribe_audio(str(audio_path))
+        result = transcribe_audio(str(audio_path), language=transcription_language)
     except Exception as exc:  # noqa: BLE001
         result = {
             "success": False,
@@ -851,6 +872,7 @@ def _transcribe_or_reuse(
             transcript_path.parent / "audio_chunks",
             refresh,
             max(10, int(chunk_seconds or DEFAULT_TRANSCRIPTION_CHUNK_SECONDS)),
+            transcription_language,
         )
         if chunk_result.get("success"):
             result = chunk_result
@@ -870,6 +892,7 @@ def _transcribe_chunks(
     chunks_dir: Path,
     refresh: bool,
     chunk_seconds: int,
+    transcription_language: str = DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE,
 ) -> Dict[str, Any]:
     try:
         chunks = _extract_audio_chunks(video_path, chunks_dir, refresh, chunk_seconds)
@@ -904,7 +927,7 @@ def _transcribe_chunks(
     provider = ""
 
     for idx, chunk in enumerate(chunks):
-        result = transcribe_audio(str(chunk))
+        result = transcribe_audio(str(chunk), language=transcription_language)
         if not provider and result.get("provider"):
             provider = str(result.get("provider"))
         text = str(result.get("transcript") or "").strip()
@@ -918,6 +941,7 @@ def _transcribe_chunks(
                 "end": round(end, 3),
                 "text": text,
                 "chunk_path": str(chunk),
+                "language": result.get("language") or "",
             })
         else:
             errors.append(
@@ -938,6 +962,9 @@ def _transcribe_chunks(
         "success": True,
         "transcript": transcript,
         "provider": provider,
+        "language": _first_non_empty(
+            *(str(segment.get("language") or "") for segment in segments),
+        ),
         "segments": segments,
         "chunks_dir": str(chunks_dir),
         "chunk_seconds": chunk_seconds,
@@ -1091,6 +1118,7 @@ def _normalize_video_understanding(raw: Any) -> Dict[str, Any]:
         brief = _truncate_middle(raw_text, 1200) if raw_text else "The video analysis completed, but the summarizer returned no text."
         return {
             "schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+            "detected_language": "",
             "brief_summary": brief,
             "detailed_summary": raw_text or brief,
             "key_points": [],
@@ -1102,6 +1130,12 @@ def _normalize_video_understanding(raw: Any) -> Dict[str, Any]:
 
     detailed = str(parsed.get("detailed_summary") or parsed.get("summary") or "").strip()
     brief = str(parsed.get("brief_summary") or "").strip()
+    detected_language = str(
+        parsed.get("detected_language")
+        or parsed.get("source_language")
+        or parsed.get("language")
+        or ""
+    ).strip()
     if not brief:
         brief = _truncate_middle(detailed, 1200) if detailed else "The video analysis completed, but the summarizer returned no brief summary."
     if not detailed:
@@ -1109,6 +1143,7 @@ def _normalize_video_understanding(raw: Any) -> Dict[str, Any]:
 
     return {
         "schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+        "detected_language": detected_language,
         "brief_summary": brief,
         "detailed_summary": detailed,
         "key_points": _coerce_string_list(parsed.get("key_points")),
@@ -1414,6 +1449,7 @@ def _public_transcription(transcription: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "success": bool(transcription.get("success")),
         "provider": transcription.get("provider") or "",
+        "language": transcription.get("language") or "",
         "error": transcription.get("error") or "",
         "chars": len(str(transcription.get("transcript") or "")),
         "audio_path": transcription.get("audio_path") or "",
@@ -1469,6 +1505,7 @@ def _summary_prompt(
     )
     transcript = str(transcription.get("transcript") or "")
     stt_error = str(transcription.get("error") or "")
+    transcript_language = str(transcription.get("language") or "")
     focus = question or "Give a concise but useful summary of the full video."
     return (
         f"Source URL: {url}\n"
@@ -1479,6 +1516,7 @@ def _summary_prompt(
         f"Duration seconds: {metadata.get('duration') or ''}\n"
         f"Upload date: {metadata.get('upload_date') or ''}\n"
         f"Stats: views={metadata.get('view_count') or ''}, likes={metadata.get('like_count') or ''}, comments={metadata.get('comment_count') or ''}\n\n"
+        f"Transcript language reported by STT: {transcript_language or '(auto/unknown)'}\n\n"
         f"User focus/question:\n{focus}\n\n"
         f"Video description / surrounding text:\n"
         f"{_truncate_middle(str(metadata.get('description') or ''), MAX_DESCRIPTION_CHARS)}\n\n"
@@ -1492,11 +1530,17 @@ def _summary_prompt(
         "Return only a JSON object with these keys:\n"
         "- brief_summary: 1-2 short paragraphs suitable for a messaging chat.\n"
         "- detailed_summary: a fuller evidence-aware understanding of the video.\n"
+        "- detected_language: BCP-47/ISO language code or concise language name for the video's primary spoken/source language.\n"
         "- key_points: array of concise strings.\n"
         "- visual_evidence: array of concise strings about what sampled frames show.\n"
         "- transcript_evidence: array of concise strings about important spoken/audio claims.\n"
         "- metadata_comments_context: concise string summarizing description/comments/context.\n"
         "- caveats: array of concise strings for uncertainty, missing transcript, sparse frames, or unavailable comments.\n\n"
+        "Write brief_summary, detailed_summary, and evidence/context fields in "
+        "the video's primary spoken/source language by default, preserving the "
+        "language of the transcript rather than translating to English. If the "
+        "transcript is unavailable, infer the source language from visible text, "
+        "metadata, comments, or the user's question and note uncertainty in caveats. "
         "If the user asked a specific question, answer it first in brief_summary "
         "and address it thoroughly in detailed_summary. Do not wrap the JSON in "
         "Markdown fences."
@@ -1597,6 +1641,14 @@ def _coerce_bool(value: Any, default: bool) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _first_non_empty(*values: str) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _truncate_middle(text: str, max_chars: int) -> str:

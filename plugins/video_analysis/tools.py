@@ -53,6 +53,7 @@ DEFAULT_MAX_FRAMES = 24
 DEFAULT_COMMENTS_LIMIT = 25
 DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 DEFAULT_TRANSCRIPTION_CHUNK_SECONDS = 60
+VIDEO_SUMMARY_SCHEMA_VERSION = 2
 LOCAL_VIDEO_EXTENSIONS = {
     ".mp4",
     ".m4v",
@@ -252,7 +253,7 @@ class VideoAnalysisService:
 
         frame_spec = _resolve_frame_spec(args, config)
         question = str(args.get("question") or "").strip()
-        summary_signature = frame_spec["signature"]
+        summary_signature = f"v{VIDEO_SUMMARY_SCHEMA_VERSION}_{frame_spec['signature']}"
         if question:
             summary_signature = f"{summary_signature}_q{_text_cache_key(question)}"
         summary_path = cache_dir / f"summary_{summary_signature}.json"
@@ -333,7 +334,7 @@ class VideoAnalysisService:
             warnings,
         )
 
-        summary = await _summarize_video(
+        video_understanding = await _summarize_video(
             url=source_reference,
             metadata=metadata,
             manifest=manifest,
@@ -341,6 +342,8 @@ class VideoAnalysisService:
             frame_analyses=frame_analyses,
             question=question,
         )
+        brief_summary = str(video_understanding.get("brief_summary") or "").strip()
+        detailed_summary = str(video_understanding.get("detailed_summary") or "").strip()
 
         extracted_at = manifest.get("extracted_at") or _utc_now()
         result: Dict[str, Any] = {
@@ -371,7 +374,16 @@ class VideoAnalysisService:
             "frame_sampling": frame_spec,
             "frames": frame_analyses,
             "transcription": _public_transcription(transcription),
-            "summary": summary,
+            "summary_schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+            "summary": brief_summary,
+            "brief_summary": brief_summary,
+            "detailed_summary": detailed_summary,
+            "key_points": video_understanding.get("key_points") or [],
+            "visual_evidence": video_understanding.get("visual_evidence") or [],
+            "transcript_evidence": video_understanding.get("transcript_evidence") or [],
+            "metadata_comments_context": video_understanding.get("metadata_comments_context") or "",
+            "caveats": video_understanding.get("caveats") or [],
+            "video_understanding": video_understanding,
             "surrounding_metadata": _public_metadata(metadata),
             "warnings": warnings,
         }
@@ -1031,7 +1043,7 @@ async def _summarize_video(
     transcription: Dict[str, Any],
     frame_analyses: List[Dict[str, Any]],
     question: str,
-) -> str:
+) -> Dict[str, Any]:
     try:
         from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
     except Exception as exc:  # noqa: BLE001
@@ -1052,7 +1064,8 @@ async def _summarize_video(
                 "You analyze videos from transcript, sampled frames, and social "
                 "metadata. Be faithful to the evidence; distinguish what is "
                 "seen, what is said, and what surrounding metadata/comments imply. "
-                "Default to short chat-ready answers."
+                "Return structured JSON so the agent can decide how much detail "
+                "to relay to the user."
             ),
         },
         {"role": "user", "content": prompt},
@@ -1063,12 +1076,81 @@ async def _summarize_video(
             task="video_analysis",
             messages=messages,
             temperature=0.2,
-            max_tokens=2200,
+            max_tokens=3200,
         )
         text = extract_content_or_reasoning(response)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Video summary LLM failed: {exc}") from exc
-    return text.strip() or "The video analysis completed, but the summarizer returned no text."
+    return _normalize_video_understanding(text)
+
+
+def _normalize_video_understanding(raw: Any) -> Dict[str, Any]:
+    raw_text = str(raw or "").strip()
+    parsed = raw if isinstance(raw, dict) else _extract_json_object(raw_text)
+    if not isinstance(parsed, dict):
+        brief = _truncate_middle(raw_text, 1200) if raw_text else "The video analysis completed, but the summarizer returned no text."
+        return {
+            "schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+            "brief_summary": brief,
+            "detailed_summary": raw_text or brief,
+            "key_points": [],
+            "visual_evidence": [],
+            "transcript_evidence": [],
+            "metadata_comments_context": "",
+            "caveats": ["The video summarizer returned unstructured text."],
+        }
+
+    detailed = str(parsed.get("detailed_summary") or parsed.get("summary") or "").strip()
+    brief = str(parsed.get("brief_summary") or "").strip()
+    if not brief:
+        brief = _truncate_middle(detailed, 1200) if detailed else "The video analysis completed, but the summarizer returned no brief summary."
+    if not detailed:
+        detailed = brief
+
+    return {
+        "schema_version": VIDEO_SUMMARY_SCHEMA_VERSION,
+        "brief_summary": brief,
+        "detailed_summary": detailed,
+        "key_points": _coerce_string_list(parsed.get("key_points")),
+        "visual_evidence": _coerce_string_list(parsed.get("visual_evidence")),
+        "transcript_evidence": _coerce_string_list(parsed.get("transcript_evidence")),
+        "metadata_comments_context": str(parsed.get("metadata_comments_context") or "").strip(),
+        "caveats": _coerce_string_list(parsed.get("caveats")),
+    }
+
+
+def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    if not raw_text:
+        return None
+    parsed = _json_loads(raw_text, default=None)
+    if isinstance(parsed, dict):
+        return parsed
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    parsed = _json_loads(raw_text[start : end + 1], default=None)
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _coerce_string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    result: List[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            text = json.dumps(item, ensure_ascii=False)
+        else:
+            text = str(item)
+        text = text.strip()
+        if text:
+            result.append(text)
+    return result
 
 
 def _ensure_yt_dlp():
@@ -1407,11 +1489,17 @@ def _summary_prompt(
         f"{_truncate_middle(transcript, MAX_TRANSCRIPT_PROMPT_CHARS) or '(no transcript available)'}\n\n"
         f"Sampled frame analyses:\n"
         f"{_truncate_middle(frames_text, MAX_FRAME_ANALYSIS_PROMPT_CHARS) or '(no frame analyses available)'}\n\n"
-        "Write the answer for a messaging chat in only 1-2 short paragraphs. "
-        "Do not use headings, bullets, or separate evidence sections unless the "
-        "user explicitly asks for a detailed breakdown. If the user asked a "
-        "specific question, answer it first, then add only the most important "
-        "context from the transcript, frames, and metadata/comments."
+        "Return only a JSON object with these keys:\n"
+        "- brief_summary: 1-2 short paragraphs suitable for a messaging chat.\n"
+        "- detailed_summary: a fuller evidence-aware understanding of the video.\n"
+        "- key_points: array of concise strings.\n"
+        "- visual_evidence: array of concise strings about what sampled frames show.\n"
+        "- transcript_evidence: array of concise strings about important spoken/audio claims.\n"
+        "- metadata_comments_context: concise string summarizing description/comments/context.\n"
+        "- caveats: array of concise strings for uncertainty, missing transcript, sparse frames, or unavailable comments.\n\n"
+        "If the user asked a specific question, answer it first in brief_summary "
+        "and address it thoroughly in detailed_summary. Do not wrap the JSON in "
+        "Markdown fences."
     )
 
 

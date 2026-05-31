@@ -18,9 +18,9 @@ Use when the user shares a video URL or direct video attachment and asks what it
 
 ## Tool
 
-Call `video_download_analyze` with either `url` or `video_path`. The tool downloads or ingests the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, summarizes the surrounding metadata/comments when available, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
+Call `video_download_analyze` with either `url` or `video_path`. The tool downloads or ingests the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, builds a structured understanding of the transcript/frames/metadata/comments, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
 
-When relaying the result back to a messaging chat, keep it to 1-2 short paragraphs unless the user explicitly asks for a detailed breakdown.
+When relaying the result back to a messaging chat, normally send only `brief_summary` or a short adaptation of it. Use `detailed_summary`, `key_points`, `visual_evidence`, `transcript_evidence`, and `metadata_comments_context` only when the user asks for details, evidence, fact-checking, or a breakdown.
 
 Default frame sampling is 5 evenly spaced frames:
 

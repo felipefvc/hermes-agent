@@ -277,7 +277,7 @@ async def test_cached_summary_short_circuits_processing(tmp_path, monkeypatch):
     cache_key = tools._cache_key(url)
     cache_dir = tmp_path / cache_key
     cache_dir.mkdir(parents=True)
-    summary_path = cache_dir / "summary_count_5_10_24.json"
+    summary_path = cache_dir / "summary_v2_count_5_10_24.json"
     summary_path.write_text(
         json.dumps({"success": True, "summary": "cached", "transcript": "full"}),
         encoding="utf-8",
@@ -311,7 +311,7 @@ async def test_cached_summary_can_return_transcript_from_transcript_cache(tmp_pa
         json.dumps({"success": True, "transcript": "full cached transcript"}),
         encoding="utf-8",
     )
-    summary_path = cache_dir / "summary_count_5_10_24.json"
+    summary_path = cache_dir / "summary_v2_count_5_10_24.json"
     summary_path.write_text(
         json.dumps({
             "success": True,
@@ -375,7 +375,16 @@ async def test_analyze_accepts_local_video_path(tmp_path, monkeypatch):
 
     async def fake_summarize(**kwargs):
         assert kwargs["url"] == str(source.resolve())
-        return "summary"
+        return {
+            "schema_version": 2,
+            "brief_summary": "brief",
+            "detailed_summary": "detailed",
+            "key_points": ["point"],
+            "visual_evidence": ["a scene"],
+            "transcript_evidence": ["spoken words"],
+            "metadata_comments_context": "local attachment",
+            "caveats": [],
+        }
 
     monkeypatch.setattr(tools, "_analyze_or_reuse_frames", fake_analyze_frames)
     monkeypatch.setattr(tools, "_summarize_video", fake_summarize)
@@ -389,7 +398,10 @@ async def test_analyze_accepts_local_video_path(tmp_path, monkeypatch):
     assert result["source_type"] == "local_file"
     assert result["source_url"] == ""
     assert result["source_path"] == str(source.resolve())
-    assert result["summary"] == "summary"
+    assert result["summary"] == "brief"
+    assert result["brief_summary"] == "brief"
+    assert result["detailed_summary"] == "detailed"
+    assert result["key_points"] == ["point"]
 
 
 def test_summary_prompt_includes_surrounding_context():
@@ -413,5 +425,39 @@ def test_summary_prompt_includes_surrounding_context():
     assert "spoken words" in prompt
     assert "a chart is visible" in prompt
     assert "What is the claim?" in prompt
-    assert "1-2 short paragraphs" in prompt
-    assert "Do not use headings" in prompt
+    assert "brief_summary" in prompt
+    assert "detailed_summary" in prompt
+    assert "Return only a JSON object" in prompt
+
+
+def test_video_understanding_normalizes_structured_json():
+    from plugins.video_analysis.tools import _normalize_video_understanding
+
+    result = _normalize_video_understanding(
+        json.dumps({
+            "brief_summary": "short chat answer",
+            "detailed_summary": "fuller understanding",
+            "key_points": ["one", "two"],
+            "visual_evidence": ["chart shown"],
+            "transcript_evidence": ["speaker makes a claim"],
+            "metadata_comments_context": "comments are supportive",
+            "caveats": ["sampled frames only"],
+        })
+    )
+
+    assert result["schema_version"] == 2
+    assert result["brief_summary"] == "short chat answer"
+    assert result["detailed_summary"] == "fuller understanding"
+    assert result["key_points"] == ["one", "two"]
+    assert result["visual_evidence"] == ["chart shown"]
+    assert result["transcript_evidence"] == ["speaker makes a claim"]
+
+
+def test_video_understanding_falls_back_for_plain_text():
+    from plugins.video_analysis.tools import _normalize_video_understanding
+
+    result = _normalize_video_understanding("plain summary")
+
+    assert result["brief_summary"] == "plain summary"
+    assert result["detailed_summary"] == "plain summary"
+    assert "unstructured text" in result["caveats"][0]

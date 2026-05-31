@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from hermes_constants import get_hermes_home
 from tools.url_safety import is_safe_url
@@ -53,6 +53,16 @@ DEFAULT_MAX_FRAMES = 24
 DEFAULT_COMMENTS_LIMIT = 25
 DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 DEFAULT_TRANSCRIPTION_CHUNK_SECONDS = 60
+LOCAL_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".m4v",
+    ".mov",
+    ".webm",
+    ".mkv",
+    ".avi",
+    ".mpeg",
+    ".mpg",
+}
 MAX_DESCRIPTION_CHARS = 12000
 MAX_COMMENTS_CHARS = 16000
 MAX_TRANSCRIPT_PROMPT_CHARS = 30000
@@ -64,18 +74,37 @@ VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
     "name": VIDEO_ANALYSIS_TOOL_NAME,
     "description": (
         "Download and analyze a video URL from YouTube, Facebook, Instagram, "
-        "X/Twitter, or another yt-dlp-supported site. Caches the video, "
+        "X/Twitter, or another yt-dlp-supported site, or analyze a local "
+        "cached video file such as a WhatsApp attachment. Caches the video, "
         "audio transcript, sampled frames, frame vision analyses, metadata, "
         "comments when available, and the final summary under "
         "$HERMES_HOME/cache/video_analysis. Use this when the user shares a "
-        "video link and asks what it says, shows, claims, or means."
+        "video link or video attachment and asks what it says, shows, claims, "
+        "or means."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "url": {
                 "type": "string",
-                "description": "The video URL to download and analyze.",
+                "description": (
+                    "The video URL to download and analyze. Provide either "
+                    "url or video_path, not both."
+                ),
+            },
+            "video_path": {
+                "type": "string",
+                "description": (
+                    "Absolute local path to a cached video attachment to "
+                    "analyze. Provide either video_path or url, not both."
+                ),
+            },
+            "source_label": {
+                "type": "string",
+                "description": (
+                    "Optional human source label for a local video_path, "
+                    "for example 'WhatsApp video attachment'."
+                ),
             },
             "question": {
                 "type": "string",
@@ -151,7 +180,7 @@ VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
                 ),
             },
         },
-        "required": ["url"],
+        "required": [],
         "additionalProperties": False,
     },
 }
@@ -191,22 +220,42 @@ class VideoAnalysisService:
 
     async def analyze(self, args: Dict[str, Any]) -> Dict[str, Any]:
         url = str(args.get("url") or "").strip()
-        if not url:
-            return _error("url is required")
-        if not _is_http_url(url):
-            return _error("url must be an http(s) video URL")
-        if not is_safe_url(url):
-            return _error("URL is blocked by Hermes URL safety policy")
+        local_video_arg = str(args.get("video_path") or "").strip()
+        if bool(url) == bool(local_video_arg):
+            return _error("Provide exactly one of url or video_path")
+        if url:
+            if not _is_http_url(url):
+                return _error("url must be an http(s) video URL")
+            if not is_safe_url(url):
+                return _error("URL is blocked by Hermes URL safety policy")
+            source_path: Optional[Path] = None
+            cache_key = _cache_key(url)
+        else:
+            source_path = _resolve_local_video_path(local_video_arg)
+            if source_path is None:
+                return _error("video_path must be an existing local video file")
+            if source_path.suffix.lower() not in LOCAL_VIDEO_EXTENSIONS:
+                return _error(
+                    (
+                        "video_path has an unsupported extension. Supported "
+                        f"extensions: {', '.join(sorted(LOCAL_VIDEO_EXTENSIONS))}"
+                    ),
+                    video_path=str(source_path),
+                )
+            cache_key = _file_cache_key(source_path)
         if not check_video_analysis_requirements():
             return _error("video_analysis requires ffmpeg and ffprobe on PATH")
 
         config = _load_config(args)
-        cache_key = _cache_key(url)
         cache_dir = config.cache_dir / cache_key
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         frame_spec = _resolve_frame_spec(args, config)
-        summary_path = cache_dir / f"summary_{frame_spec['signature']}.json"
+        question = str(args.get("question") or "").strip()
+        summary_signature = frame_spec["signature"]
+        if question:
+            summary_signature = f"{summary_signature}_q{_text_cache_key(question)}"
+        summary_path = cache_dir / f"summary_{summary_signature}.json"
         refresh = bool(args.get("refresh", False))
         return_transcript = bool(args.get("return_transcript", False))
 
@@ -223,14 +272,24 @@ class VideoAnalysisService:
 
         warnings: List[str] = []
 
-        media = await asyncio.to_thread(
-            _download_or_reuse_video,
-            url,
-            cache_dir,
-            config,
-            refresh,
-            warnings,
-        )
+        if url:
+            media = await asyncio.to_thread(
+                _download_or_reuse_video,
+                url,
+                cache_dir,
+                config,
+                refresh,
+                warnings,
+            )
+        else:
+            media = await asyncio.to_thread(
+                _ingest_or_reuse_local_video,
+                source_path,
+                cache_dir,
+                refresh,
+                warnings,
+                str(args.get("source_label") or "").strip(),
+            )
         if not media.get("success"):
             return media
 
@@ -238,6 +297,9 @@ class VideoAnalysisService:
         metadata = media.get("metadata") or {}
         manifest = media.get("manifest") or {}
         duration = _coerce_float(metadata.get("duration")) or _probe_duration(video_path)
+        source_url = str(manifest.get("source_url") or url or "")
+        source_path_text = str(manifest.get("source_path") or "")
+        source_reference = source_url or source_path_text or str(video_path)
 
         audio_path = cache_dir / "audio.mp3"
         transcript_path = cache_dir / "transcript.json"
@@ -267,25 +329,32 @@ class VideoAnalysisService:
             frame_manifest,
             frame_analysis_path,
             refresh,
-            args.get("question"),
+            question,
             warnings,
         )
 
         summary = await _summarize_video(
-            url=url,
+            url=source_reference,
             metadata=metadata,
             manifest=manifest,
             transcription=transcription,
             frame_analyses=frame_analyses,
-            question=str(args.get("question") or "").strip(),
+            question=question,
         )
 
         extracted_at = manifest.get("extracted_at") or _utc_now()
         result: Dict[str, Any] = {
             "success": True,
             "cached": False,
-            "source_url": url,
-            "canonical_url": metadata.get("webpage_url") or metadata.get("original_url") or url,
+            "source_type": manifest.get("source_type") or metadata.get("source_type") or ("url" if url else "local_file"),
+            "source_url": source_url,
+            "source_path": source_path_text,
+            "canonical_url": (
+                manifest.get("canonical_url")
+                or metadata.get("webpage_url")
+                or metadata.get("original_url")
+                or source_reference
+            ),
             "extracted_at": extracted_at,
             "cache_key": cache_key,
             "cache_dir": str(cache_dir),
@@ -384,6 +453,158 @@ def _resolve_frame_spec(args: Dict[str, Any], config: VideoAnalysisConfig) -> Di
     }
 
 
+def _resolve_local_video_path(value: str) -> Optional[Path]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme == "file":
+        path = Path(unquote(parsed.path)).expanduser()
+    else:
+        path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = path.resolve()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def _ingest_or_reuse_local_video(
+    source_path: Path,
+    cache_dir: Path,
+    refresh: bool,
+    warnings: List[str],
+    source_label: str = "",
+) -> Dict[str, Any]:
+    manifest_path = cache_dir / "manifest.json"
+    metadata_path = cache_dir / "metadata.json"
+    existing_manifest = _read_json(manifest_path, default={})
+    existing_video_raw = str(existing_manifest.get("video_path") or "")
+    existing_video = Path(existing_video_raw) if existing_video_raw else None
+    if existing_video is not None and existing_video.exists() and metadata_path.exists() and not refresh:
+        _mark_local_source_seen(existing_manifest, manifest_path, source_path, source_label)
+        return {
+            "success": True,
+            "video_path": str(existing_video),
+            "metadata": _read_json(metadata_path, default={}),
+            "manifest": existing_manifest,
+        }
+
+    source_path = source_path.resolve()
+    target = cache_dir / f"source{source_path.suffix.lower()}"
+    if refresh:
+        _delete_source_downloads(cache_dir, keep_path=source_path)
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and target.resolve() == source_path:
+            video_path = target
+        else:
+            shutil.copy2(source_path, target)
+            video_path = target
+    except Exception as exc:  # noqa: BLE001
+        return _error(
+            f"Could not cache local video file: {exc}",
+            source_path=str(source_path),
+            cache_dir=str(cache_dir),
+            warnings=warnings,
+        )
+
+    metadata = _local_video_metadata(
+        source_path=source_path,
+        cached_video_path=video_path,
+        source_label=source_label,
+    )
+    _write_json(metadata_path, metadata)
+
+    source_ref = str(source_path)
+    manifest = {
+        "cache_version": 1,
+        "source_type": "local_file",
+        "source_url": "",
+        "source_path": source_ref,
+        "source_label": source_label,
+        "canonical_url": f"local-video:{cache_dir.name}",
+        "cache_key": cache_dir.name,
+        "extracted_at": _utc_now(),
+        "video_path": str(video_path),
+        "metadata_path": str(metadata_path),
+        "downloader": "local_file",
+        "seen_sources": [
+            {
+                "source_path": source_ref,
+                "source_label": source_label,
+                "seen_at": _utc_now(),
+            }
+        ],
+    }
+    _write_json(manifest_path, manifest)
+    return {
+        "success": True,
+        "video_path": str(video_path),
+        "metadata": metadata,
+        "manifest": manifest,
+    }
+
+
+def _local_video_metadata(
+    *,
+    source_path: Path,
+    cached_video_path: Path,
+    source_label: str,
+) -> Dict[str, Any]:
+    stat = source_path.stat()
+    label = source_label or "local video attachment"
+    return {
+        "id": _file_cache_key(source_path),
+        "title": source_path.name,
+        "description": (
+            f"Local video file from {label}. Original path: {source_path}. "
+            f"Cached for analysis at: {cached_video_path}."
+        ),
+        "uploader": label,
+        "webpage_url": "",
+        "original_url": "",
+        "extractor": "local_file",
+        "extractor_key": "LocalFile",
+        "duration": _probe_duration(cached_video_path),
+        "timestamp": int(stat.st_mtime),
+        "comments": [],
+        "comments_captured": 0,
+        "file_name": source_path.name,
+        "source_type": "local_file",
+        "source_path": str(source_path),
+        "cached_video_path": str(cached_video_path),
+        "file_size": stat.st_size,
+    }
+
+
+def _mark_local_source_seen(
+    manifest: Dict[str, Any],
+    manifest_path: Path,
+    source_path: Path,
+    source_label: str,
+) -> None:
+    seen = manifest.get("seen_sources")
+    if not isinstance(seen, list):
+        seen = []
+    source_ref = str(source_path)
+    if not any(isinstance(item, dict) and item.get("source_path") == source_ref for item in seen):
+        seen.append({
+            "source_path": source_ref,
+            "source_label": source_label,
+            "seen_at": _utc_now(),
+        })
+    manifest["last_seen_at"] = _utc_now()
+    manifest["last_source_path"] = source_ref
+    manifest["seen_sources"] = seen[-20:]
+    _write_json(manifest_path, manifest)
+
+
 def _download_or_reuse_video(
     url: str,
     cache_dir: Path,
@@ -394,8 +615,9 @@ def _download_or_reuse_video(
     manifest_path = cache_dir / "manifest.json"
     metadata_path = cache_dir / "metadata.json"
     existing_manifest = _read_json(manifest_path, default={})
-    existing_video = Path(str(existing_manifest.get("video_path") or ""))
-    if existing_video.exists() and metadata_path.exists() and not refresh:
+    existing_video_raw = str(existing_manifest.get("video_path") or "")
+    existing_video = Path(existing_video_raw) if existing_video_raw else None
+    if existing_video is not None and existing_video.exists() and metadata_path.exists() and not refresh:
         return {
             "success": True,
             "video_path": str(existing_video),
@@ -549,9 +771,21 @@ def _is_youtube_url(url: str) -> bool:
     )
 
 
-def _delete_source_downloads(cache_dir: Path) -> None:
+def _delete_source_downloads(cache_dir: Path, keep_path: Optional[Path] = None) -> None:
+    keep_resolved: Optional[Path] = None
+    if keep_path is not None:
+        try:
+            keep_resolved = keep_path.resolve()
+        except OSError:
+            keep_resolved = keep_path
     for stale in cache_dir.glob("source.*"):
         if stale.is_file():
+            if keep_resolved is not None:
+                try:
+                    if stale.resolve() == keep_resolved:
+                        continue
+                except OSError:
+                    pass
             stale.unlink(missing_ok=True)
 
 
@@ -1088,6 +1322,8 @@ def _public_metadata(metadata: Dict[str, Any]) -> Dict[str, Any]:
         "like_count": metadata.get("like_count"),
         "comment_count": metadata.get("comment_count"),
         "comments_captured": metadata.get("comments_captured", 0),
+        "source_type": metadata.get("source_type") or "",
+        "source_path": metadata.get("source_path") or "",
     }
 
 
@@ -1211,6 +1447,19 @@ def _find_downloaded_video(cache_dir: Path) -> Optional[Path]:
 
 def _cache_key(url: str) -> str:
     return hashlib.sha256(url.strip().encode("utf-8")).hexdigest()[:32]
+
+
+def _file_cache_key(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"local-video-v1\0")
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()[:32]
+
+
+def _text_cache_key(text: str) -> str:
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:12]
 
 
 def _is_http_url(url: str) -> bool:

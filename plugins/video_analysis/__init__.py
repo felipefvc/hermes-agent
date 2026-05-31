@@ -1,8 +1,8 @@
 """Video analysis plugin.
 
 Adds one agent-facing tool, ``video_download_analyze``, for downloading and analyzing
-videos from YouTube, Facebook, Instagram, X/Twitter, and other yt-dlp-backed
-sites.
+videos from YouTube, Facebook, Instagram, X/Twitter, other yt-dlp-backed sites,
+and local cached video attachments.
 """
 
 from __future__ import annotations
@@ -37,5 +37,5 @@ def register(ctx) -> None:
         handler=service.handle,
         check_fn=check_video_analysis_requirements,
         is_async=True,
-        description="Download, transcribe, sample frames, and summarize a social video URL.",
+        description="Download, transcribe, sample frames, and summarize a social video URL or local video file.",
     )

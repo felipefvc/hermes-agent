@@ -9,8 +9,8 @@ synced into those sandboxes so the agent can access them.
 (``required_credential_files``) and user config (``terminal.credential_files``).
 
 **Cache directories** — gateway-cached uploads, browser screenshots, TTS
-audio, and processed images.  Mounted read-only so the remote terminal can
-reference files the host side created (e.g. ``unzip`` an uploaded archive).
+audio, videos, and processed images.  Mounted read-only so the remote terminal
+can reference files the host side created (e.g. ``unzip`` an uploaded archive).
 
 Remote backends call :func:`get_credential_file_mounts`,
 :func:`get_skills_directory_mount` / :func:`iter_skills_files`, and
@@ -337,15 +337,16 @@ def iter_skills_files(
 
 
 # ---------------------------------------------------------------------------
-# Cache directory mounts (documents, images, audio, screenshots)
+# Cache directory mounts (documents, images, audio, videos, screenshots)
 # ---------------------------------------------------------------------------
 
-# The four cache subdirectories that should be mirrored into remote backends.
+# Cache subdirectories that should be mirrored into remote backends.
 # Each tuple is (new_subpath, old_name) matching hermes_constants.get_hermes_dir().
 _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/documents", "document_cache"),
     ("cache/images", "image_cache"),
     ("cache/audio", "audio_cache"),
+    ("cache/videos", "video_cache"),
     ("cache/screenshots", "browser_screenshots"),
 ]
 
@@ -432,5 +433,3 @@ def iter_cache_files(
 def clear_credential_files() -> None:
     """Reset the skill-scoped registry (e.g. on session reset)."""
     _get_registered().clear()
-
-

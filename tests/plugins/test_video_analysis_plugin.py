@@ -23,6 +23,10 @@ def test_register_wires_tool_and_aux_task():
     assert tool["name"] == "video_download_analyze"
     assert tool["toolset"] == "video_analysis"
     assert tool["is_async"] is True
+    props = tool["schema"]["parameters"]["properties"]
+    assert "url" in props
+    assert "video_path" in props
+    assert tool["schema"]["parameters"]["required"] == []
 
 
 def test_check_requirements_needs_ffmpeg_and_ffprobe(monkeypatch):
@@ -151,6 +155,36 @@ def test_youtube_download_403_retries_with_android_player(tmp_path, monkeypatch)
     assert calls[1]["extractor_args"]["youtube"]["player_client"] == ["android"]
     assert calls[1]["extractor_args"]["youtube"]["max_comments"] == ["25"]
     assert "android player client fallback" in warnings[0]
+
+
+def test_local_video_ingest_caches_metadata_and_manifest(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video bytes")
+    cache_dir = tmp_path / "analysis-cache"
+
+    monkeypatch.setattr(tools, "_probe_duration", lambda _path: 12.5)
+
+    warnings = []
+    result = tools._ingest_or_reuse_local_video(
+        source,
+        cache_dir,
+        False,
+        warnings,
+        "WhatsApp video attachment",
+    )
+
+    cached_video = Path(result["video_path"])
+    assert result["success"] is True
+    assert cached_video.exists()
+    assert cached_video.read_bytes() == b"video bytes"
+    assert result["manifest"]["source_type"] == "local_file"
+    assert result["manifest"]["source_path"] == str(source.resolve())
+    assert result["manifest"]["downloader"] == "local_file"
+    assert result["metadata"]["title"] == "clip.mp4"
+    assert result["metadata"]["duration"] == 12.5
+    assert warnings == []
 
 
 def test_failed_transcript_cache_retries_with_audio_chunks(tmp_path, monkeypatch):
@@ -302,6 +336,60 @@ async def test_cached_summary_can_return_transcript_from_transcript_cache(tmp_pa
 
     assert result["cached"] is True
     assert result["transcript"] == "full cached transcript"
+
+
+@pytest.mark.asyncio
+async def test_analyze_accepts_local_video_path(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+
+    source = tmp_path / "whatsapp_clip.mp4"
+    source.write_bytes(b"video bytes")
+
+    monkeypatch.setattr(tools, "check_video_analysis_requirements", lambda: True)
+    monkeypatch.setattr(
+        tools,
+        "_load_config",
+        lambda _args: tools.VideoAnalysisConfig(cache_dir=tmp_path / "cache"),
+    )
+    monkeypatch.setattr(tools, "_probe_duration", lambda _path: 8.0)
+    monkeypatch.setattr(
+        tools,
+        "_transcribe_or_reuse",
+        lambda *_args: {
+            "success": True,
+            "transcript": "spoken words",
+            "provider": "openai",
+        },
+    )
+    monkeypatch.setattr(
+        tools,
+        "_extract_or_reuse_frames",
+        lambda *_args: {
+            "frames_dir": str(tmp_path / "frames"),
+            "frames": [{"index": 1, "timestamp_seconds": 4.0, "path": str(tmp_path / "frame.jpg")}],
+        },
+    )
+
+    async def fake_analyze_frames(*_args):
+        return [{"index": 1, "timestamp_seconds": 4.0, "path": str(tmp_path / "frame.jpg"), "analysis": "a scene"}]
+
+    async def fake_summarize(**kwargs):
+        assert kwargs["url"] == str(source.resolve())
+        return "summary"
+
+    monkeypatch.setattr(tools, "_analyze_or_reuse_frames", fake_analyze_frames)
+    monkeypatch.setattr(tools, "_summarize_video", fake_summarize)
+
+    result = await tools.VideoAnalysisService().analyze({
+        "video_path": str(source),
+        "source_label": "WhatsApp video attachment",
+    })
+
+    assert result["success"] is True
+    assert result["source_type"] == "local_file"
+    assert result["source_url"] == ""
+    assert result["source_path"] == str(source.resolve())
+    assert result["summary"] == "summary"
 
 
 def test_summary_prompt_includes_surrounding_context():

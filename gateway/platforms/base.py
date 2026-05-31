@@ -879,10 +879,13 @@ VIDEO_CACHE_DIR = get_hermes_dir("cache/videos", "video_cache")
 
 SUPPORTED_VIDEO_TYPES = {
     ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
     ".mov": "video/quicktime",
     ".webm": "video/webm",
     ".mkv": "video/x-matroska",
     ".avi": "video/x-msvideo",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
 }
 
 
@@ -899,6 +902,49 @@ def cache_video_from_bytes(data: bytes, ext: str = ".mp4") -> str:
     filepath = cache_dir / filename
     filepath.write_bytes(data)
     return str(filepath)
+
+
+async def cache_video_from_url(url: str, ext: str = ".mp4", retries: int = 2) -> str:
+    """Download a video file from a URL and save it to the local cache."""
+    from tools.url_safety import is_safe_url
+    if not is_safe_url(url):
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
+
+    import httpx
+    _log = logging.getLogger(__name__)
+
+    async with httpx.AsyncClient(
+        timeout=120.0,
+        follow_redirects=True,
+        event_hooks={"response": [_ssrf_redirect_guard]},
+    ) as client:
+        for attempt in range(retries + 1):
+            try:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+                        "Accept": "video/*,*/*;q=0.8",
+                    },
+                )
+                response.raise_for_status()
+                return cache_video_from_bytes(response.content, ext)
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+                    raise
+                if attempt < retries:
+                    wait = 1.5 * (attempt + 1)
+                    _log.debug(
+                        "Video cache retry %d/%d for %s (%.1fs): %s",
+                        attempt + 1,
+                        retries,
+                        safe_url_for_log(url),
+                        wait,
+                        exc,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------------------

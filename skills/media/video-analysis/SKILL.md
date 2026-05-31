@@ -1,6 +1,6 @@
 ---
 name: video-analysis
-description: "Download social videos, transcribe audio, sample frames, and summarize with Hermes vision/LLM."
+description: "Download social videos or inspect cached video attachments, transcribe audio, sample frames, and summarize with Hermes vision/LLM."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -14,16 +14,22 @@ metadata:
 
 # Video Analysis
 
-Use when the user shares a video URL and asks what it says, shows, claims, summarizes, or implies. This is for YouTube, Facebook, Instagram, X/Twitter, and other sites supported by yt-dlp.
+Use when the user shares a video URL or direct video attachment and asks what it says, shows, claims, summarizes, or implies. URLs are handled through yt-dlp for YouTube, Facebook, Instagram, X/Twitter, and other supported sites. Local attachment paths, such as cached WhatsApp videos, are handled directly.
 
 ## Tool
 
-Call `video_download_analyze` with the URL. The tool downloads the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, summarizes the surrounding metadata/comments, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
+Call `video_download_analyze` with either `url` or `video_path`. The tool downloads or ingests the video, extracts a compact audio track, transcribes it through Hermes STT, samples frames, analyzes frames through Hermes vision, summarizes the surrounding metadata/comments when available, and caches artifacts under `$HERMES_HOME/cache/video_analysis/`.
 
 Default frame sampling is 5 evenly spaced frames:
 
 ```json
 {"url": "https://www.youtube.com/watch?v=VIDEO_ID"}
+```
+
+For a direct video attachment saved by a gateway:
+
+```json
+{"video_path": "/root/.hermes/cache/videos/vid_1234.mp4", "source_label": "WhatsApp video attachment"}
 ```
 
 For denser visual inspection:
@@ -93,9 +99,9 @@ Use `cookies_file` or `cookies_from_browser` for videos that require login. Avoi
 
 ## Cache Behavior
 
-The cache is keyed by the source URL. The tool stores:
+The cache is keyed by source URL for links and by file content for local video attachments. The tool stores:
 
-- original source URL, canonical URL, and extraction date
+- original source URL or local source path, canonical URL or local cache id, and extraction date
 - downloaded video file
 - extracted audio file
 - transcript JSON

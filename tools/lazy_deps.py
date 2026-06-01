@@ -168,6 +168,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # ─── Tools ─────────────────────────────────────────────────────────────
     # ACP adapter (VS Code / Zed / JetBrains integration)
     "tool.acp": ("agent-client-protocol==0.9.0",),
+    # Social/video download for the video_analysis plugin. yt-dlp changes
+    # frequently as sites change, so keep this opt-in and pinned.
+    "tool.video_analysis": ("yt-dlp==2025.10.14",),
     # Dashboard (`hermes dashboard`)
     "tool.dashboard": (
         "fastapi==0.133.1",

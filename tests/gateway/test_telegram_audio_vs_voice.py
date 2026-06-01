@@ -53,6 +53,16 @@ def _audio_event(path: str = "/tmp/song.mp3") -> MessageEvent:
     )
 
 
+def _video_event(path: str = "/tmp/clip.mp4") -> MessageEvent:
+    return MessageEvent(
+        text="",
+        message_type=MessageType.VIDEO,
+        source=SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm"),
+        media_urls=[path],
+        media_types=["video/mp4"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. VOICE still goes through STT
 # ---------------------------------------------------------------------------
@@ -165,6 +175,30 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
     assert "transcription is disabled" not in result.lower()
     assert "audio file attachment" in result.lower()
     assert "/tmp/podcast.m4a" in result
+
+
+@pytest.mark.asyncio
+async def test_video_attachment_adds_video_analysis_path_note():
+    """Video attachments should expose a local path for video_download_analyze."""
+    runner = _make_runner(stt_enabled=True)
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
+    event = _video_event("/tmp/video_abcd1234_clip.mp4")
+
+    with patch(
+        "tools.credential_files.to_agent_visible_cache_path",
+        side_effect=lambda p: p,
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is not None
+    assert "video attachment" in result.lower()
+    assert "video_download_analyze" in result
+    assert "video_path" in result
+    assert "/tmp/video_abcd1234_clip.mp4" in result
 
 
 # ---------------------------------------------------------------------------

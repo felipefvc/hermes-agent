@@ -356,6 +356,25 @@ class TestTranscribeOpenAIExtended:
         call_kwargs = mock_client.audio.transcriptions.create.call_args
         assert call_kwargs.kwargs["language"] == "pt"
 
+    def test_auto_language_override_omits_configured_language(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+
+        mock_client = MagicMock()
+        mock_client.audio.transcriptions.create.return_value = "teste"
+
+        with patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch(
+                 "tools.transcription_tools._load_stt_config",
+                 return_value={"openai": {"language": "en"}},
+             ), \
+             patch("openai.OpenAI", return_value=mock_client):
+            from tools.transcription_tools import _transcribe_openai
+            result = _transcribe_openai(sample_wav, "whisper-1", language="auto")
+
+        call_kwargs = mock_client.audio.transcriptions.create.call_args
+        assert "language" not in call_kwargs.kwargs
+        assert result["transcript"] == "teste"
+
     def test_whitespace_stripped(self, monkeypatch, sample_wav):
         monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
 
@@ -957,6 +976,16 @@ class TestTranscribeAudioDispatch:
             transcribe_audio(sample_ogg, model=None)
 
         assert mock_openai.call_args[0][1] == "gpt-4o-transcribe"
+
+    def test_language_override_passed_to_openai(self, sample_ogg):
+        with patch("tools.transcription_tools._load_stt_config", return_value={"provider": "openai"}), \
+             patch("tools.transcription_tools._get_provider", return_value="openai"), \
+             patch("tools.transcription_tools._transcribe_openai",
+                   return_value={"success": True, "transcript": "oi"}) as mock_openai:
+            from tools.transcription_tools import transcribe_audio
+            transcribe_audio(sample_ogg, language="auto")
+
+        assert mock_openai.call_args.kwargs["language"] == "auto"
 
 
 # ============================================================================

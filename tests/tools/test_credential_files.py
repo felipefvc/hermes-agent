@@ -378,12 +378,14 @@ class TestCacheDirectoryMounts:
         hermes_home.mkdir()
         (hermes_home / "cache" / "documents").mkdir(parents=True)
         (hermes_home / "cache" / "audio").mkdir(parents=True)
+        (hermes_home / "cache" / "videos").mkdir(parents=True)
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         mounts = get_cache_directory_mounts()
         paths = {m["container_path"] for m in mounts}
         assert "/root/.hermes/cache/documents" in paths
         assert "/root/.hermes/cache/audio" in paths
+        assert "/root/.hermes/cache/videos" in paths
 
     def test_skips_nonexistent_dirs(self, tmp_path, monkeypatch):
         """Dirs that don't exist on disk are not returned."""
@@ -404,16 +406,19 @@ class TestCacheDirectoryMounts:
         # Use legacy dir name — get_hermes_dir prefers old if it exists
         (hermes_home / "document_cache").mkdir()
         (hermes_home / "image_cache").mkdir()
+        (hermes_home / "video_cache").mkdir()
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         mounts = get_cache_directory_mounts()
         host_paths = {m["host_path"] for m in mounts}
         assert str(hermes_home / "document_cache") in host_paths
         assert str(hermes_home / "image_cache") in host_paths
+        assert str(hermes_home / "video_cache") in host_paths
         # Container paths always use the new layout
         container_paths = {m["container_path"] for m in mounts}
         assert "/root/.hermes/cache/documents" in container_paths
         assert "/root/.hermes/cache/images" in container_paths
+        assert "/root/.hermes/cache/videos" in container_paths
 
     def test_empty_hermes_home(self, tmp_path, monkeypatch):
         """No cache dirs → empty list."""

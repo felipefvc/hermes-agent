@@ -436,7 +436,7 @@ class DockerEnvironment(BaseEnvironment):
                     skills_mount["container_path"],
                 )
 
-            # Mount host-side cache directories (documents, images, audio,
+            # Mount host-side cache directories (documents, images, audio, video,
             # screenshots) so the agent can access uploaded files and other
             # cached media from inside the container.  Read-only — the
             # container reads these but the host gateway manages writes.

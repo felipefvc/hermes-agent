@@ -1,6 +1,8 @@
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 
 
@@ -356,6 +358,27 @@ def test_real_dm_still_processed_after_broadcast_filter():
         senderId="34612345678@s.whatsapp.net",
     )
     assert adapter._should_process_message(msg) is True
+
+
+@pytest.mark.asyncio
+async def test_direct_video_media_path_becomes_video_event():
+    from gateway.platforms.base import MessageType
+
+    adapter = _make_adapter(dm_policy="open")
+    event = await adapter._build_message_event(
+        _dm_message(
+            body="",
+            hasMedia=True,
+            mediaType="video",
+            mediaUrls=["/tmp/hermes-video-cache/vid_abcd1234.mp4"],
+            messageId="wamid.video",
+        )
+    )
+
+    assert event is not None
+    assert event.message_type == MessageType.VIDEO
+    assert event.media_urls == ["/tmp/hermes-video-cache/vid_abcd1234.mp4"]
+    assert event.media_types == ["video/mp4"]
 
 
 def test_is_broadcast_chat_helper_recognizes_common_jids():

@@ -7,7 +7,17 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 
-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
+from cron.scheduler import (
+    _build_job_prompt,
+    _deliver_result,
+    _is_operator_failure,
+    _operator_failure_delivery_job,
+    _resolve_delivery_target,
+    _resolve_origin,
+    _send_media_via_adapter,
+    run_job,
+    SILENT_MARKER,
+)
 from tools.env_passthrough import clear_env_passthrough
 from tools.credential_files import clear_credential_files
 
@@ -485,6 +495,79 @@ class TestRoutingIntents:
             targets = _resolve_delivery_targets({"deliver": token, "origin": None})
             platforms = sorted(t["platform"].lower() for t in targets)
             assert platforms == ["discord", "telegram"], f"token={token!r} -> {platforms}"
+
+
+class TestOperatorFailureDelivery:
+    """Provider/auth failures are operator notices, not group-chat reports."""
+
+    def test_auth_failure_rewrites_to_telegram_home_not_origin(self):
+        job = {
+            "id": "auth-job",
+            "deliver": "origin",
+            "origin": {
+                "platform": "discord",
+                "chat_id": "group-chat",
+                "thread_id": "thread-1",
+            },
+        }
+
+        rewritten = _operator_failure_delivery_job(
+            job,
+            "RuntimeError: Codex token refresh failed with status 401",
+        )
+
+        assert _is_operator_failure("Provider authentication failed: token expired")
+        assert rewritten is not job
+        assert rewritten["deliver"] == "telegram"
+        assert rewritten["origin"] is None
+
+    def test_non_auth_failure_keeps_original_delivery(self):
+        job = {
+            "id": "script-job",
+            "deliver": "origin",
+            "origin": {"platform": "discord", "chat_id": "group-chat"},
+        }
+
+        rewritten = _operator_failure_delivery_job(
+            job,
+            "Script exited with code 1: report generator failed",
+        )
+
+        assert not _is_operator_failure("Script exited with code 1")
+        assert rewritten is job
+
+    def test_auth_failure_delivery_goes_to_telegram_home(self, monkeypatch):
+        from gateway.config import Platform
+
+        monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "telegram-home")
+        monkeypatch.setenv("TELEGRAM_CRON_THREAD_ID", "cron-topic")
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {
+            Platform.TELEGRAM: pconfig,
+            Platform.DISCORD: pconfig,
+        }
+
+        job = {
+            "id": "auth-job",
+            "name": "auth-check",
+            "deliver": "origin",
+            "origin": {"platform": "discord", "chat_id": "group-chat"},
+        }
+        delivery_job = _operator_failure_delivery_job(
+            job,
+            "RuntimeError: Session expired and no refresh token is available.",
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            _deliver_result(delivery_job, "auth failed")
+
+        send_mock.assert_called_once()
+        assert send_mock.call_args.args[2] == "telegram-home"
+        assert send_mock.call_args.kwargs["thread_id"] == "cron-topic"
 
 
 class TestDeliverResultWrapping:

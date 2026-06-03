@@ -1,10 +1,18 @@
 """Telegram-specific gateway filtering for noisy status/error output."""
 
-from gateway.config import Platform
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from gateway.config import HomeChannel, Platform
 from gateway.run import (
+    GatewayRunner,
+    _is_gateway_operator_failure,
     _prepare_gateway_status_message,
     _sanitize_gateway_final_response,
 )
+from gateway.session import SessionSource
 
 
 def test_telegram_status_suppresses_auxiliary_and_retry_noise():
@@ -81,3 +89,71 @@ def test_telegram_final_response_keeps_normal_answers():
     answer = "Here is the clean summary you asked for."
 
     assert _sanitize_gateway_final_response(Platform.TELEGRAM, answer) == answer
+
+
+def test_gateway_operator_failure_detects_auth_breakage():
+    """Credential failures should be classified for private operator routing."""
+    result = {
+        "failed": True,
+        "error": "RuntimeError: Codex auth is missing access_token; token_revoked",
+    }
+
+    assert _is_gateway_operator_failure(result, "")
+    assert _is_gateway_operator_failure(
+        {
+            "failed": True,
+            "error": "Primary provider auth failed: Codex auth is missing access_token.",
+        },
+        "",
+    )
+
+
+def test_gateway_operator_failure_ignores_context_token_errors():
+    """Context-size failures remain user-actionable origin replies."""
+    result = {
+        "failed": True,
+        "error": "Session exceeded the model token limit and is too large.",
+    }
+
+    assert not _is_gateway_operator_failure(result, "")
+
+
+@pytest.mark.asyncio
+async def test_gateway_operator_failure_delivers_to_telegram_home():
+    """Auth failures from a group source should be sent to Telegram home only."""
+    runner = GatewayRunner.__new__(GatewayRunner)
+    telegram = SimpleNamespace(
+        send=AsyncMock(return_value=SimpleNamespace(success=True)),
+    )
+    runner.adapters = {Platform.TELEGRAM: telegram}
+    runner.config = SimpleNamespace(
+        get_home_channel=lambda platform: HomeChannel(
+            platform=platform,
+            chat_id="telegram-home",
+            name="Home",
+            thread_id="ops-thread",
+        )
+    )
+    source = SessionSource(
+        platform=Platform.WHATSAPP,
+        chat_id="private-source-id",
+        chat_type="group",
+        thread_id="private-thread-id",
+    )
+
+    delivered = await runner._deliver_gateway_operator_failure_notice(
+        source,
+        {
+            "failed": True,
+            "error": "Provider authentication failed: token refresh failed with status 401",
+        },
+    )
+
+    assert delivered
+    telegram.send.assert_awaited_once()
+    assert telegram.send.call_args.args[0] == "telegram-home"
+    assert telegram.send.call_args.args[1].startswith("⚠️ Provider authentication failed")
+    assert "Source: whatsapp group" in telegram.send.call_args.args[1]
+    assert "private-source-id" not in telegram.send.call_args.args[1]
+    assert "private-thread-id" not in telegram.send.call_args.args[1]
+    assert telegram.send.call_args.kwargs["metadata"] == {"thread_id": "ops-thread"}

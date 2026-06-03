@@ -56,6 +56,8 @@ DEFAULT_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 DEFAULT_TRANSCRIPTION_CHUNK_SECONDS = 60
 DEFAULT_VIDEO_TRANSCRIPTION_LANGUAGE = "auto"
 VIDEO_SUMMARY_SCHEMA_VERSION = 3
+FRAME_EXTRACTION_SCHEMA_VERSION = 2
+FRAME_ANALYSIS_BOX_SIZE = 960
 LOCAL_VIDEO_EXTENSIONS = {
     ".mp4",
     ".m4v",
@@ -476,13 +478,17 @@ def _resolve_frame_spec(args: Dict[str, Any], config: VideoAnalysisConfig) -> Di
     count = _coerce_int(args.get("frame_count"), config.frame_count, 1, 100)
     interval = _coerce_float(args.get("frame_interval_seconds"), config.frame_interval_seconds, 1.0)
     max_frames = _coerce_int(args.get("max_frames"), config.max_frames, 1, 200)
-    signature = _safe_signature(f"{mode}_{count}_{interval:g}_{max_frames}")
+    signature = _safe_signature(
+        f"frames-v{FRAME_EXTRACTION_SCHEMA_VERSION}_{mode}_{count}_{interval:g}_{max_frames}"
+    )
     return {
         "mode": mode,
         "count": count,
         "interval_seconds": interval,
         "max_frames": max_frames,
         "signature": signature,
+        "extraction_version": FRAME_EXTRACTION_SCHEMA_VERSION,
+        "analysis_box_size": FRAME_ANALYSIS_BOX_SIZE,
     }
 
 
@@ -1299,6 +1305,8 @@ def _extract_frame(video_path: Path, output_path: Path, timestamp: float) -> Non
         str(video_path),
         "-frames:v",
         "1",
+        "-vf",
+        f"scale={FRAME_ANALYSIS_BOX_SIZE}:{FRAME_ANALYSIS_BOX_SIZE}:force_original_aspect_ratio=decrease:flags=lanczos",
         "-q:v",
         "3",
         "-loglevel",

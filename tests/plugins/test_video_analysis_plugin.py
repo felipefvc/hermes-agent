@@ -44,6 +44,21 @@ def test_check_requirements_needs_ffmpeg_and_ffprobe(monkeypatch):
     assert tools.check_video_analysis_requirements() is False
 
 
+def test_resolve_local_video_path_accepts_agent_visible_cache_path(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+
+    hermes_home = tmp_path / ".hermes"
+    video_dir = hermes_home / "video_cache"
+    video_dir.mkdir(parents=True)
+    source = video_dir / "vid_quoted.mp4"
+    source.write_bytes(b"video")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    resolved = tools._resolve_local_video_path("/root/.hermes/cache/videos/vid_quoted.mp4")
+
+    assert resolved == source
+
+
 def test_frame_sampling_defaults_evenly_across_duration():
     from plugins.video_analysis.tools import _sample_times
 

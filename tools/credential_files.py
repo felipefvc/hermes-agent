@@ -403,6 +403,27 @@ def to_agent_visible_cache_path(
     return host_path
 
 
+def to_host_cache_path(
+    cache_path: str,
+    container_base: str = "/root/.hermes",
+) -> str:
+    """Translate a sandbox-visible cache path back to the host path.
+
+    Agent instructions often mention mounted cache files using the container
+    path (for example ``/root/.hermes/cache/videos/clip.mp4``). Host-side
+    tools need the original host path to open those files.
+    """
+    path = Path(cache_path)
+    for mount in get_cache_directory_mounts(container_base=container_base):
+        container_dir = Path(mount["container_path"])
+        try:
+            rel = path.relative_to(container_dir)
+            return str(Path(mount["host_path"]) / rel)
+        except ValueError:
+            continue
+    return cache_path
+
+
 def iter_cache_files(
     container_base: str = "/root/.hermes",
 ) -> List[Dict[str, str]]:

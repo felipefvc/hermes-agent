@@ -216,6 +216,29 @@ def check_whatsapp_requirements() -> bool:
         return False
 
 
+def _as_string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value]
+    return []
+
+
+def _mime_from_whatsapp_hint(hint: str, default: str = "unknown") -> str:
+    normalized = str(hint or "").strip().lower()
+    if "/" in normalized:
+        return normalized
+    if "image" in normalized:
+        return "image/jpeg"
+    if "video" in normalized:
+        return "video/mp4"
+    if "audio" in normalized or "ptt" in normalized:
+        return "audio/ogg"
+    if "document" in normalized:
+        return "application/octet-stream"
+    return default
+
+
 class WhatsAppAdapter(BasePlatformAdapter):
     """
     WhatsApp adapter.
@@ -1160,8 +1183,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
 
             # Determine message type
             msg_type = MessageType.TEXT
+            media_type = str(data.get("mediaType", "") or "")
             if data.get("hasMedia"):
-                media_type = data.get("mediaType", "")
                 if "image" in media_type:
                     msg_type = MessageType.PHOTO
                 elif "video" in media_type:
@@ -1186,64 +1209,101 @@ class WhatsAppAdapter(BasePlatformAdapter):
             
             # Download media URLs to the local cache so agent tools
             # can access them reliably regardless of URL expiration.
-            raw_urls = data.get("mediaUrls", [])
+            raw_urls = []
+            raw_type_hints = []
+            direct_urls = _as_string_list(data.get("mediaUrls", []))
+            direct_type_hints = _as_string_list(data.get("mediaTypes", []))
+            for index, url in enumerate(direct_urls):
+                raw_urls.append(url)
+                raw_type_hints.append(
+                    direct_type_hints[index]
+                    if index < len(direct_type_hints)
+                    else media_type
+                )
+
+            quoted_urls = _as_string_list(data.get("quotedMediaUrls", []))
+            quoted_type_hints = _as_string_list(data.get("quotedMediaTypes", []))
+            for index, url in enumerate(quoted_urls):
+                raw_urls.append(url)
+                raw_type_hints.append(
+                    quoted_type_hints[index]
+                    if index < len(quoted_type_hints)
+                    else str(data.get("quotedMediaType", "") or "")
+                )
+
             cached_urls = []
             media_types = []
-            for url in raw_urls:
-                if msg_type == MessageType.PHOTO and url.startswith(("http://", "https://")):
+            for index, url in enumerate(raw_urls):
+                media_hint = raw_type_hints[index] if index < len(raw_type_hints) else ""
+                hint_mime = _mime_from_whatsapp_hint(media_hint)
+                is_photo = msg_type == MessageType.PHOTO or hint_mime.startswith("image/")
+                is_voice = msg_type == MessageType.VOICE or hint_mime.startswith("audio/")
+                is_video = msg_type == MessageType.VIDEO or hint_mime.startswith("video/")
+                is_document = msg_type == MessageType.DOCUMENT or (
+                    bool(media_hint)
+                    and not is_photo
+                    and not is_voice
+                    and not is_video
+                )
+
+                if is_photo and url.startswith(("http://", "https://")):
                     try:
                         cached_path = await cache_image_from_url(url, ext=".jpg")
                         cached_urls.append(cached_path)
-                        media_types.append("image/jpeg")
+                        media_types.append(hint_mime if hint_mime.startswith("image/") else "image/jpeg")
                         print(f"[{self.name}] Cached user image: {cached_path}", flush=True)
                     except Exception as e:
                         print(f"[{self.name}] Failed to cache image: {e}", flush=True)
                         cached_urls.append(url)
-                        media_types.append("image/jpeg")
-                elif msg_type == MessageType.PHOTO and os.path.isabs(url):
+                        media_types.append(hint_mime if hint_mime.startswith("image/") else "image/jpeg")
+                elif is_photo and os.path.isabs(url):
                     # Local file path — bridge already downloaded the image
                     cached_urls.append(url)
-                    media_types.append("image/jpeg")
+                    media_types.append(hint_mime if hint_mime.startswith("image/") else "image/jpeg")
                     print(f"[{self.name}] Using bridge-cached image: {url}", flush=True)
-                elif msg_type == MessageType.VOICE and url.startswith(("http://", "https://")):
+                elif is_voice and url.startswith(("http://", "https://")):
                     try:
                         cached_path = await cache_audio_from_url(url, ext=".ogg")
                         cached_urls.append(cached_path)
-                        media_types.append("audio/ogg")
+                        media_types.append(hint_mime if hint_mime.startswith("audio/") else "audio/ogg")
                         print(f"[{self.name}] Cached user voice: {cached_path}", flush=True)
                     except Exception as e:
                         print(f"[{self.name}] Failed to cache voice: {e}", flush=True)
                         cached_urls.append(url)
-                        media_types.append("audio/ogg")
-                elif msg_type == MessageType.VOICE and os.path.isabs(url):
+                        media_types.append(hint_mime if hint_mime.startswith("audio/") else "audio/ogg")
+                elif is_voice and os.path.isabs(url):
                     # Local file path — bridge already downloaded the audio
                     cached_urls.append(url)
-                    media_types.append("audio/ogg")
+                    media_types.append(hint_mime if hint_mime.startswith("audio/") else "audio/ogg")
                     print(f"[{self.name}] Using bridge-cached audio: {url}", flush=True)
-                elif msg_type == MessageType.VIDEO and url.startswith(("http://", "https://")):
+                elif is_video and url.startswith(("http://", "https://")):
                     try:
                         cached_path = await cache_video_from_url(url, ext=".mp4")
                         cached_urls.append(cached_path)
-                        media_types.append(media_type if media_type.startswith("video/") else "video/mp4")
+                        media_types.append(hint_mime if hint_mime.startswith("video/") else "video/mp4")
                         print(f"[{self.name}] Cached user video: {cached_path}", flush=True)
                     except Exception as e:
                         print(f"[{self.name}] Failed to cache video: {e}", flush=True)
                         cached_urls.append(url)
-                        media_types.append(media_type if media_type.startswith("video/") else "video/mp4")
-                elif msg_type == MessageType.DOCUMENT and os.path.isabs(url):
+                        media_types.append(hint_mime if hint_mime.startswith("video/") else "video/mp4")
+                elif is_video and os.path.isabs(url):
+                    cached_urls.append(url)
+                    media_types.append(hint_mime if hint_mime.startswith("video/") else "video/mp4")
+                    print(f"[{self.name}] Using bridge-cached video: {url}", flush=True)
+                elif is_document and os.path.isabs(url):
                     # Local file path — bridge already downloaded the document
                     cached_urls.append(url)
                     ext = Path(url).suffix.lower()
-                    mime = SUPPORTED_DOCUMENT_TYPES.get(ext, "application/octet-stream")
+                    mime = (
+                        hint_mime
+                        if hint_mime != "unknown"
+                        else SUPPORTED_DOCUMENT_TYPES.get(ext, "application/octet-stream")
+                    )
                     media_types.append(mime)
                     print(f"[{self.name}] Using bridge-cached document: {url}", flush=True)
-                elif msg_type == MessageType.VIDEO and os.path.isabs(url):
-                    cached_urls.append(url)
-                    media_types.append(media_type if media_type.startswith("video/") else "video/mp4")
-                    print(f"[{self.name}] Using bridge-cached video: {url}", flush=True)
                 else:
                     cached_urls.append(url)
-                    media_types.append("unknown")
+                    media_types.append(hint_mime)
 
             # For text-readable documents, inject file content directly into
             # the message text so the agent can read it inline.

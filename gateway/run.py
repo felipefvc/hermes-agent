@@ -226,7 +226,24 @@ _GATEWAY_PROVIDER_POLICY_RE = re.compile(
 )
 
 _GATEWAY_AUTH_ERROR_RE = re.compile(
-    r"(provider\s+authentication\s+failed|incorrect\s+api\s+key|invalid\s+api\s+key|\b401\b)",
+    r"("
+    r"provider\s+authentication\s+failed"
+    r"|authentication\s+(?:failed|error)"
+    r"|auth(?:entication)?\s+error"
+    r"|auth\s+(?:failed|missing|revoked|expired|invalid)"
+    r"|not\s+logged\s+in"
+    r"|no\s+.{0,40}credentials"
+    r"|(?:incorrect|invalid|missing)\s+.{0,20}api\s+key"
+    r"|api\s+key\s+.{0,40}(?:incorrect|invalid|missing|not\s+found|expired|revoked)"
+    r"|access_token\s+.{0,40}(?:missing|not\s+found|expired|revoked|invalid)"
+    r"|missing\s+access_token"
+    r"|credentials\s+.{0,40}(?:missing|not\s+found|not\s+configured|expired|revoked)"
+    r"|token\s+.{0,40}(?:refresh\s+failed|failed|expired|revoked|invalid|missing|not\s+found)"
+    r"|token_revoked"
+    r"|(?:session|oauth)\s+.{0,40}(?:expired|revoked|invalid|reused)"
+    r"|invalid_(?:grant|token)"
+    r"|\b401\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -411,6 +428,49 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     if _looks_like_gateway_provider_error(redacted):
         return _gateway_provider_error_reply(redacted)
     return redacted
+
+
+def _gateway_operator_failure_text(agent_result: dict, response: str = "") -> str:
+    """Collect failure text used to classify operator/runtime failures."""
+    parts: list[str] = []
+    if isinstance(agent_result, dict):
+        for key in ("error", "final_response"):
+            value = agent_result.get(key)
+            if value:
+                parts.append(str(value))
+    if response:
+        parts.append(str(response))
+    return "\n".join(parts)
+
+
+def _is_gateway_operator_failure(agent_result: dict, response: str = "") -> bool:
+    """True when a gateway failure is about Hermes credentials/runtime auth."""
+    if not isinstance(agent_result, dict) or not agent_result.get("failed"):
+        return False
+    text = _gateway_operator_failure_text(agent_result, response)
+    return bool(text and _GATEWAY_AUTH_ERROR_RE.search(text))
+
+
+def _format_gateway_operator_failure_source(source: Any) -> str:
+    """Return a compact, non-identifying source label for operator alerts."""
+    platform = _gateway_platform_value(getattr(source, "platform", None)) or "unknown"
+    chat_type = str(getattr(source, "chat_type", "") or "").strip()
+
+    bits = [platform]
+    if chat_type:
+        bits.append(chat_type)
+    return " ".join(bits)
+
+
+def _gateway_operator_failure_notice(agent_result: dict, response: str, source: Any) -> str:
+    """Build the private Telegram notice for an operator/runtime failure."""
+    raw = _gateway_operator_failure_text(agent_result, response)
+    redacted = _redact_gateway_user_facing_secrets(raw)
+    lines = [_gateway_provider_error_reply(redacted)]
+    source_label = _format_gateway_operator_failure_source(source)
+    if source_label:
+        lines.append(f"Source: {source_label}")
+    return "\n".join(lines)
 
 
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
@@ -6953,6 +7013,51 @@ class GatewayRunner:
 
         await adapter.send(source.chat_id, content, metadata=metadata)
 
+    async def _deliver_gateway_operator_failure_notice(
+        self,
+        source,
+        agent_result: dict,
+        response: str = "",
+    ) -> bool:
+        """Send credential/runtime failures to Telegram home instead of origin chat."""
+        adapter = self.adapters.get(Platform.TELEGRAM)
+        if not adapter:
+            logger.warning(
+                "Gateway operator failure from %s could not be delivered: Telegram adapter is not connected",
+                _format_gateway_operator_failure_source(source),
+            )
+            return False
+
+        config = getattr(self, "config", None)
+        home = None
+        if config and hasattr(config, "get_home_channel"):
+            try:
+                home = config.get_home_channel(Platform.TELEGRAM)
+            except Exception:
+                home = None
+        if not home or not getattr(home, "chat_id", None):
+            logger.warning(
+                "Gateway operator failure from %s could not be delivered: Telegram home channel is not configured",
+                _format_gateway_operator_failure_source(source),
+            )
+            return False
+
+        notice = _gateway_operator_failure_notice(agent_result, response, source)
+        metadata = {"thread_id": home.thread_id} if getattr(home, "thread_id", None) else None
+        try:
+            result = await adapter.send(str(home.chat_id), notice, metadata=metadata)
+        except Exception as exc:
+            logger.warning("Failed to deliver gateway operator failure to Telegram home: %s", exc)
+            return False
+
+        if result is not None and getattr(result, "success", True) is False:
+            logger.warning(
+                "Telegram home rejected gateway operator failure notice: %s",
+                getattr(result, "error", "send returned success=False"),
+            )
+            return False
+        return True
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -9093,6 +9198,13 @@ class GatewayRunner:
                 agent_result, response, history_len=len(history),
             )
             response = _sanitize_gateway_final_response(source.platform, response)
+            if _is_gateway_operator_failure(agent_result, response):
+                await self._deliver_gateway_operator_failure_notice(
+                    source,
+                    agent_result,
+                    response,
+                )
+                response = None
 
             # If the agent's session_id changed during compression, update
             # session_entry so transcript writes below go to the right session.
@@ -9405,6 +9517,19 @@ class GatewayRunner:
             status_hint = ""
             status_code = getattr(e, "status_code", None)
             _hist_len = len(history) if 'history' in locals() else 0
+            operator_failure = {
+                "failed": True,
+                "error": (
+                    f"{error_type}: {error_detail}"
+                    + (f" status {status_code}" if status_code is not None else "")
+                ),
+            }
+            if _is_gateway_operator_failure(operator_failure, ""):
+                await self._deliver_gateway_operator_failure_notice(
+                    source,
+                    operator_failure,
+                )
+                return None
             if status_code == 401:
                 status_hint = " Check your API key or run `claude /login` to refresh OAuth credentials."
             elif status_code == 402:
@@ -11996,10 +12121,15 @@ class GatewayRunner:
                 user_config=user_config,
             )
             if not runtime_kwargs.get("api_key"):
-                await adapter.send(
-                    source.chat_id,
-                    f"❌ Background task {task_id} failed: no provider credentials configured.",
-                    metadata=_thread_metadata,
+                await self._deliver_gateway_operator_failure_notice(
+                    source,
+                    {
+                        "failed": True,
+                        "error": (
+                            f"Background task {task_id} failed: "
+                            "no provider credentials configured."
+                        ),
+                    },
                 )
                 return
 
@@ -12076,6 +12206,15 @@ class GatewayRunner:
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
+                if _is_gateway_operator_failure(
+                    {"failed": True, "error": result.get("error")},
+                    "",
+                ):
+                    await self._deliver_gateway_operator_failure_notice(
+                        source,
+                        {"failed": True, "error": result.get("error")},
+                    )
+                    return
                 response = f"Error: {result['error']}"
 
             # Extract media files from the response
@@ -12134,11 +12273,18 @@ class GatewayRunner:
         except Exception as e:
             logger.exception("Background task %s failed", task_id)
             try:
-                await adapter.send(
-                    chat_id=source.chat_id,
-                    content=f"❌ Background task {task_id} failed: {e}",
-                    metadata=_thread_metadata,
-                )
+                failure = {
+                    "failed": True,
+                    "error": f"Background task {task_id} failed: {type(e).__name__}: {e}",
+                }
+                if _is_gateway_operator_failure(failure, ""):
+                    await self._deliver_gateway_operator_failure_notice(source, failure)
+                else:
+                    await adapter.send(
+                        chat_id=source.chat_id,
+                        content=f"❌ Background task {task_id} failed: {e}",
+                        metadata=_thread_metadata,
+                    )
             except Exception:
                 pass
 
@@ -16822,6 +16968,21 @@ class GatewayRunner:
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
+                return
+            status_failure = {"failed": True, "error": str(message or "")}
+            if _is_gateway_operator_failure(status_failure, ""):
+                safe_schedule_threadsafe(
+                    self._deliver_gateway_operator_failure_notice(source, status_failure),
+                    _loop_for_step,
+                    logger=logger,
+                    log_message=f"status_callback ({event_type}) operator notice scheduling error",
+                )
+                logger.debug(
+                    "status_callback diverted operator failure for %s/%s: %s",
+                    source.platform.value if source.platform else "unknown",
+                    event_type,
+                    _redact_gateway_user_facing_secrets(str(message or ""))[:160],
+                )
                 return
             prepared_message = _prepare_gateway_status_message(
                 source.platform,

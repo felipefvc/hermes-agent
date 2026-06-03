@@ -14,6 +14,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -153,6 +154,23 @@ from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_
 # response with this marker to suppress delivery.  Output is still saved
 # locally for audit.
 SILENT_MARKER = "[SILENT]"
+
+_CRON_OPERATOR_FAILURE_RE = re.compile(
+    r"("
+    r"provider authentication failed"
+    r"|authentication (?:failed|error)"
+    r"|auth(?:entication)? error"
+    r"|not logged in"
+    r"|no .{0,40}credentials"
+    r"|(?:incorrect|invalid|missing) .{0,20}api key"
+    r"|api key .{0,40}(?:incorrect|invalid|missing|not found|expired|revoked)"
+    r"|credentials .{0,40}(?:missing|not found|not configured|expired|revoked)"
+    r"|token .{0,40}(?:refresh failed|failed)"
+    r"|(?:token|session) .{0,40}(?:expired|revoked|invalid|reused)"
+    r"|invalid_(?:grant|token)"
+    r")",
+    re.IGNORECASE,
+)
 
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
@@ -551,6 +569,35 @@ def _resolve_delivery_target(job: dict) -> Optional[dict]:
     """Resolve the concrete auto-delivery target for a cron job, if any."""
     targets = _resolve_delivery_targets(job)
     return targets[0] if targets else None
+
+
+def _is_operator_failure(error: Optional[str]) -> bool:
+    """True when a cron failure is an operator/runtime auth problem.
+
+    These failures are about the Hermes installation (expired OAuth token,
+    missing credentials, revoked session) rather than the scheduled task's
+    actual result. Keep them out of origin group chats and route them to the
+    operator's Telegram cron/home target instead.
+    """
+    return bool(error and _CRON_OPERATOR_FAILURE_RE.search(str(error)))
+
+
+def _operator_failure_delivery_job(job: dict, error: Optional[str]) -> dict:
+    """Return the job record to use for failure delivery.
+
+    Normal task failures keep the job's configured delivery target. Operator
+    auth/runtime failures are delivered to Telegram only. Clearing ``origin``
+    matters because a bare ``deliver="telegram"`` intentionally reuses a
+    matching Telegram origin chat for normal results; operator failures should
+    go to the configured Telegram home/cron channel, not a Telegram group that
+    happened to create the job.
+    """
+    if not _is_operator_failure(error):
+        return job
+    alert_job = dict(job)
+    alert_job["deliver"] = "telegram"
+    alert_job["origin"] = None
+    return alert_job
 
 
 # Media extension sets — audio routing is centralized in gateway.platforms.base
@@ -1952,7 +1999,8 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 delivery_error = None
                 if should_deliver:
                     try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        delivery_job = _operator_failure_delivery_job(job, error) if not success else job
+                        delivery_error = _deliver_result(delivery_job, deliver_content, adapters=adapters, loop=loop)
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)

@@ -325,6 +325,56 @@ class TestBridgeEventMetadata:
         assert event.raw_message["quotedRemoteJid"] == "15551234567@s.whatsapp.net"
         assert event.raw_message["hasQuotedMessage"] is True
 
+    @pytest.mark.asyncio
+    async def test_quoted_reply_text_is_exposed_for_context_injection(self):
+        adapter = _make_adapter()
+        data = {
+            "messageId": "incoming-msg",
+            "chatId": "120363001234567890@g.us",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Hermes Test Group",
+            "isGroup": True,
+            "body": "Comrad",
+            "hasMedia": False,
+            "mediaUrls": [],
+            "mentionedIds": [],
+            "botIds": ["99999999999@s.whatsapp.net"],
+            "quotedMessageId": "link-msg",
+            "quotedParticipant": "15550001111@s.whatsapp.net",
+            "quotedRemoteJid": "120363001234567890@g.us",
+            "hasQuotedMessage": True,
+            "quotedText": "https://example.com/story",
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.reply_to_message_id == "link-msg"
+        assert event.reply_to_text == "https://example.com/story"
+
+    @pytest.mark.asyncio
+    async def test_quoted_reply_text_gets_synthetic_id_when_bridge_has_no_stanza(self):
+        adapter = _make_adapter()
+        data = {
+            "messageId": "incoming-msg",
+            "chatId": "15551234567@s.whatsapp.net",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Tester",
+            "isGroup": False,
+            "body": "what about this?",
+            "hasMedia": False,
+            "mediaUrls": [],
+            "quotedText": "https://example.com/story",
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.reply_to_message_id == "quote:incoming-msg"
+        assert event.reply_to_text == "https://example.com/story"
+
 
 # ---------------------------------------------------------------------------
 # display_config tier classification

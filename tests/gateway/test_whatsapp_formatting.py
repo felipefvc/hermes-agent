@@ -375,6 +375,42 @@ class TestBridgeEventMetadata:
         assert event.reply_to_message_id == "quote:incoming-msg"
         assert event.reply_to_text == "https://example.com/story"
 
+    @pytest.mark.asyncio
+    async def test_quoted_video_media_is_exposed_with_text_reply(self):
+        from gateway.platforms.base import MessageType
+
+        adapter = _make_adapter()
+        data = {
+            "messageId": "incoming-msg",
+            "chatId": "120363001234567890@g.us",
+            "senderId": "15551234567@s.whatsapp.net",
+            "senderName": "Tester",
+            "chatName": "Hermes Test Group",
+            "isGroup": True,
+            "body": "Comrad o que e isso?",
+            "hasMedia": False,
+            "mediaUrls": [],
+            "mentionedIds": [],
+            "botIds": ["99999999999@s.whatsapp.net"],
+            "quotedMessageId": "video-msg",
+            "quotedParticipant": "15550001111@s.whatsapp.net",
+            "quotedRemoteJid": "120363001234567890@g.us",
+            "hasQuotedMessage": True,
+            "quotedText": "[video received]",
+            "quotedMediaType": "video",
+            "quotedMediaUrls": ["/tmp/hermes-video-cache/vid_quoted.mp4"],
+            "quotedMediaTypes": ["video/mp4"],
+        }
+
+        event = await adapter._build_message_event(data)
+
+        assert event is not None
+        assert event.message_type == MessageType.TEXT
+        assert event.text == "Comrad o que e isso?"
+        assert event.reply_to_text == "[video received]"
+        assert event.media_urls == ["/tmp/hermes-video-cache/vid_quoted.mp4"]
+        assert event.media_types == ["video/mp4"]
+
 
 # ---------------------------------------------------------------------------
 # display_config tier classification

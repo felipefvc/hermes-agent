@@ -16,6 +16,7 @@ from tools.credential_files import (
     iter_skills_files,
     register_credential_file,
     register_credential_files,
+    to_host_cache_path,
 )
 
 
@@ -427,6 +428,28 @@ class TestCacheDirectoryMounts:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
         assert get_cache_directory_mounts() == []
+
+    def test_container_cache_path_translates_to_host_cache_path(self, tmp_path, monkeypatch):
+        """Sandbox-visible cache paths can be resolved by host-side tools."""
+        hermes_home = tmp_path / ".hermes"
+        video_dir = hermes_home / "cache" / "videos"
+        video_dir.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        translated = to_host_cache_path("/root/.hermes/cache/videos/clip.mp4")
+
+        assert translated == str(video_dir / "clip.mp4")
+
+    def test_container_cache_path_translates_to_legacy_host_cache_path(self, tmp_path, monkeypatch):
+        """Legacy host cache dirs still map from the new container layout."""
+        hermes_home = tmp_path / ".hermes"
+        video_dir = hermes_home / "video_cache"
+        video_dir.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        translated = to_host_cache_path("/root/.hermes/cache/videos/clip.mp4")
+
+        assert translated == str(video_dir / "clip.mp4")
 
 
 class TestIterCacheFiles:

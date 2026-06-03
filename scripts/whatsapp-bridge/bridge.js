@@ -206,6 +206,97 @@ function extractQuotedText(quotedMessage) {
   return '';
 }
 
+function extensionForMime(mime, fallback, extMap = {}) {
+  const normalized = String(mime || '').toLowerCase().split(';')[0].trim();
+  if (extMap[normalized]) return extMap[normalized];
+  if (normalized.includes('mp4')) return '.mp4';
+  if (normalized.includes('webm')) return '.webm';
+  if (normalized.includes('mkv')) return '.mkv';
+  if (normalized.includes('ogg')) return '.ogg';
+  if (normalized.includes('mpeg')) return '.mp3';
+  if (normalized.includes('pdf')) return '.pdf';
+  return fallback;
+}
+
+function quotedMessageInfo(msg, contextInfo, chatId, botIds) {
+  const quotedParticipant = contextInfo?.participant || undefined;
+  const normalizedParticipant = normalizeWhatsAppId(quotedParticipant);
+  const normalizedBotIds = new Set((botIds || []).map(normalizeWhatsAppId).filter(Boolean));
+  const key = {
+    remoteJid: contextInfo?.remoteJid || chatId,
+    id: contextInfo?.stanzaId || undefined,
+    fromMe: normalizedParticipant ? normalizedBotIds.has(normalizedParticipant) : false,
+  };
+  if (quotedParticipant) key.participant = quotedParticipant;
+  return {
+    key,
+    message: contextInfo?.quotedMessage || {},
+    messageTimestamp: msg.messageTimestamp,
+  };
+}
+
+async function downloadQuotedMedia(msg, contextInfo, chatId, botIds) {
+  const quotedContent = unwrapMessageContent(contextInfo?.quotedMessage || {});
+  if (!quotedContent || !Object.keys(quotedContent).length) {
+    return { mediaType: '', mediaUrls: [], mediaTypes: [] };
+  }
+
+  const quotedMsg = quotedMessageInfo(msg, contextInfo, chatId, botIds);
+
+  try {
+    if (quotedContent.imageMessage) {
+      const buf = await downloadMediaMessage(quotedMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      const mime = quotedContent.imageMessage.mimetype || 'image/jpeg';
+      const ext = extensionForMime(mime, '.jpg', {
+        'image/jpeg': '.jpg',
+        'image/png': '.png',
+        'image/webp': '.webp',
+        'image/gif': '.gif',
+      });
+      mkdirSync(IMAGE_CACHE_DIR, { recursive: true });
+      const filePath = path.join(IMAGE_CACHE_DIR, `img_${randomBytes(6).toString('hex')}${ext}`);
+      writeFileSync(filePath, buf);
+      return { mediaType: 'image', mediaUrls: [filePath], mediaTypes: [mime] };
+    }
+
+    if (quotedContent.videoMessage) {
+      const buf = await downloadMediaMessage(quotedMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      const mime = quotedContent.videoMessage.mimetype || 'video/mp4';
+      const ext = extensionForMime(mime, '.mp4');
+      mkdirSync(VIDEO_CACHE_DIR, { recursive: true });
+      const filePath = path.join(VIDEO_CACHE_DIR, `vid_${randomBytes(6).toString('hex')}${ext}`);
+      writeFileSync(filePath, buf);
+      return { mediaType: 'video', mediaUrls: [filePath], mediaTypes: [mime] };
+    }
+
+    if (quotedContent.audioMessage || quotedContent.pttMessage) {
+      const audioMsg = quotedContent.pttMessage || quotedContent.audioMessage;
+      const buf = await downloadMediaMessage(quotedMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      const mime = audioMsg.mimetype || 'audio/ogg';
+      const ext = extensionForMime(mime, '.ogg');
+      mkdirSync(AUDIO_CACHE_DIR, { recursive: true });
+      const filePath = path.join(AUDIO_CACHE_DIR, `aud_${randomBytes(6).toString('hex')}${ext}`);
+      writeFileSync(filePath, buf);
+      return { mediaType: 'audio', mediaUrls: [filePath], mediaTypes: [mime] };
+    }
+
+    if (quotedContent.documentMessage) {
+      const fileName = quotedContent.documentMessage.fileName || 'document';
+      const buf = await downloadMediaMessage(quotedMsg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+      const mime = quotedContent.documentMessage.mimetype || 'application/octet-stream';
+      mkdirSync(DOCUMENT_CACHE_DIR, { recursive: true });
+      const safeFileName = path.basename(fileName).replace(/[^a-zA-Z0-9._-]/g, '_');
+      const filePath = path.join(DOCUMENT_CACHE_DIR, `doc_${randomBytes(6).toString('hex')}_${safeFileName}`);
+      writeFileSync(filePath, buf);
+      return { mediaType: 'document', mediaUrls: [filePath], mediaTypes: [mime] };
+    }
+  } catch (err) {
+    console.error('[bridge] Failed to download quoted media:', err.message);
+  }
+
+  return { mediaType: '', mediaUrls: [], mediaTypes: [] };
+}
+
 mkdirSync(SESSION_DIR, { recursive: true });
 
 // Build LID → phone reverse map from session files (lid-mapping-{phone}.json)
@@ -389,6 +480,10 @@ async function startSocket() {
       let hasMedia = false;
       let mediaType = '';
       const mediaUrls = [];
+      const mediaTypes = [];
+      const quotedMedia = hasQuotedMessage
+        ? await downloadQuotedMedia(msg, contextInfo, chatId, botIds)
+        : { mediaType: '', mediaUrls: [], mediaTypes: [] };
 
       if (messageContent.conversation) {
         body = messageContent.conversation;
@@ -407,6 +502,7 @@ async function startSocket() {
           const filePath = path.join(IMAGE_CACHE_DIR, `img_${randomBytes(6).toString('hex')}${ext}`);
           writeFileSync(filePath, buf);
           mediaUrls.push(filePath);
+          mediaTypes.push(mime);
         } catch (err) {
           console.error('[bridge] Failed to download image:', err.message);
         }
@@ -422,6 +518,7 @@ async function startSocket() {
           const filePath = path.join(VIDEO_CACHE_DIR, `vid_${randomBytes(6).toString('hex')}${ext}`);
           writeFileSync(filePath, buf);
           mediaUrls.push(filePath);
+          mediaTypes.push(mime);
         } catch (err) {
           console.error('[bridge] Failed to download video:', err.message);
         }
@@ -437,6 +534,7 @@ async function startSocket() {
           const filePath = path.join(AUDIO_CACHE_DIR, `aud_${randomBytes(6).toString('hex')}${ext}`);
           writeFileSync(filePath, buf);
           mediaUrls.push(filePath);
+          mediaTypes.push(mime);
         } catch (err) {
           console.error('[bridge] Failed to download audio:', err.message);
         }
@@ -452,6 +550,7 @@ async function startSocket() {
           const filePath = path.join(DOCUMENT_CACHE_DIR, `doc_${randomBytes(6).toString('hex')}_${safeFileName}`);
           writeFileSync(filePath, buf);
           mediaUrls.push(filePath);
+          mediaTypes.push(messageContent.documentMessage.mimetype || 'application/octet-stream');
         } catch (err) {
           console.error('[bridge] Failed to download document:', err.message);
         }
@@ -493,12 +592,16 @@ async function startSocket() {
         hasMedia,
         mediaType,
         mediaUrls,
+        mediaTypes,
         mentionedIds,
         quotedMessageId,
         quotedParticipant,
         quotedRemoteJid,
         hasQuotedMessage,
         quotedText,
+        quotedMediaType: quotedMedia.mediaType,
+        quotedMediaUrls: quotedMedia.mediaUrls,
+        quotedMediaTypes: quotedMedia.mediaTypes,
         replyToBot,
         botIds,
         timestamp: msg.messageTimestamp,

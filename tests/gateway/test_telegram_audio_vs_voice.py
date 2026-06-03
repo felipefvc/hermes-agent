@@ -63,6 +63,17 @@ def _video_event(path: str = "/tmp/clip.mp4") -> MessageEvent:
     )
 
 
+def _text_reply_with_video_event(path: str = "/tmp/clip.mp4") -> MessageEvent:
+    return MessageEvent(
+        text="Comrad o que e isso?",
+        message_type=MessageType.TEXT,
+        source=SessionSource(platform=Platform.WHATSAPP, chat_id="1", chat_type="group"),
+        media_urls=[path],
+        media_types=["video/mp4"],
+        reply_to_text="[video received]",
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. VOICE still goes through STT
 # ---------------------------------------------------------------------------
@@ -199,6 +210,30 @@ async def test_video_attachment_adds_video_analysis_path_note():
     assert "video_download_analyze" in result
     assert "video_path" in result
     assert "/tmp/video_abcd1234_clip.mp4" in result
+
+
+@pytest.mark.asyncio
+async def test_text_reply_with_quoted_video_adds_video_analysis_path_note():
+    """Quoted WhatsApp video media should work even when the trigger is text."""
+    runner = _make_runner(stt_enabled=True)
+    source = SessionSource(platform=Platform.WHATSAPP, chat_id="1", chat_type="group")
+    event = _text_reply_with_video_event("/tmp/vid_quoted.mp4")
+
+    with patch(
+        "tools.credential_files.to_agent_visible_cache_path",
+        side_effect=lambda p: f"/root/.hermes/cache/videos/{p.rsplit('/', 1)[-1]}",
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is not None
+    assert "video attachment" in result.lower()
+    assert "video_download_analyze" in result
+    assert "/root/.hermes/cache/videos/vid_quoted.mp4" in result
+    assert "Comrad o que e isso?" in result
 
 
 # ---------------------------------------------------------------------------

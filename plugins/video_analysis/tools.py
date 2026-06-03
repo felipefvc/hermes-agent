@@ -28,6 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote, urlparse
 
 from hermes_constants import get_hermes_home
+from tools.credential_files import to_host_cache_path
 from tools.url_safety import is_safe_url
 
 logger = logging.getLogger(__name__)
@@ -491,16 +492,20 @@ def _resolve_local_video_path(value: str) -> Optional[Path]:
         return None
     parsed = urlparse(raw)
     if parsed.scheme == "file":
-        path = Path(unquote(parsed.path)).expanduser()
+        candidate = to_host_cache_path(unquote(parsed.path))
     else:
-        path = Path(raw).expanduser()
+        candidate = to_host_cache_path(raw)
+    path = Path(candidate).expanduser()
     if not path.is_absolute():
         path = path.resolve()
     try:
         resolved = path.resolve()
     except OSError:
         resolved = path
-    if not resolved.is_file():
+    try:
+        if not resolved.is_file():
+            return None
+    except OSError:
         return None
     return resolved
 

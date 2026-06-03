@@ -1251,6 +1251,17 @@ class WhatsAppAdapter(BasePlatformAdapter):
             body = data.get("body", "")
             if data.get("isGroup"):
                 body = self._clean_bot_mention_text(body, data)
+            reply_to_text = data.get("quotedText")
+            if isinstance(reply_to_text, str):
+                reply_to_text = reply_to_text.strip() or None
+            else:
+                reply_to_text = None
+            reply_to_message_id = data.get("quotedMessageId")
+            if reply_to_message_id is not None:
+                reply_to_message_id = str(reply_to_message_id).strip() or None
+            if reply_to_text and not reply_to_message_id:
+                incoming_id = str(data.get("messageId") or "").strip()
+                reply_to_message_id = f"quote:{incoming_id}" if incoming_id else "quote"
             MAX_TEXT_INJECT_BYTES = 100 * 1024
             if msg_type == MessageType.DOCUMENT and cached_urls:
                 for doc_path in cached_urls:
@@ -1286,6 +1297,8 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 message_id=data.get("messageId"),
                 media_urls=cached_urls,
                 media_types=media_types,
+                reply_to_message_id=reply_to_message_id,
+                reply_to_text=reply_to_text,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")

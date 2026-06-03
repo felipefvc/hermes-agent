@@ -137,16 +137,20 @@ function isReplyToBot({ quotedMessageId, quotedParticipant, quotedRemoteJid, bot
   );
 }
 
-function getMessageContent(msg) {
-  const content = msg?.message || {};
-  if (content.ephemeralMessage?.message) return content.ephemeralMessage.message;
-  if (content.viewOnceMessage?.message) return content.viewOnceMessage.message;
-  if (content.viewOnceMessageV2?.message) return content.viewOnceMessageV2.message;
-  if (content.documentWithCaptionMessage?.message) return content.documentWithCaptionMessage.message;
-  if (content.templateMessage?.hydratedTemplate) return content.templateMessage.hydratedTemplate;
+function unwrapMessageContent(content) {
+  if (!content || typeof content !== 'object') return {};
+  if (content.ephemeralMessage?.message) return unwrapMessageContent(content.ephemeralMessage.message);
+  if (content.viewOnceMessage?.message) return unwrapMessageContent(content.viewOnceMessage.message);
+  if (content.viewOnceMessageV2?.message) return unwrapMessageContent(content.viewOnceMessageV2.message);
+  if (content.documentWithCaptionMessage?.message) return unwrapMessageContent(content.documentWithCaptionMessage.message);
+  if (content.templateMessage?.hydratedTemplate) return unwrapMessageContent(content.templateMessage.hydratedTemplate);
   if (content.buttonsMessage) return content.buttonsMessage;
   if (content.listMessage) return content.listMessage;
   return content;
+}
+
+function getMessageContent(msg) {
+  return unwrapMessageContent(msg?.message || {});
 }
 
 function getContextInfo(messageContent) {
@@ -157,6 +161,49 @@ function getContextInfo(messageContent) {
     }
   }
   return {};
+}
+
+function firstNonEmptyText(...values) {
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return '';
+}
+
+function extractQuotedText(quotedMessage) {
+  const quotedContent = unwrapMessageContent(quotedMessage || {});
+  const text = firstNonEmptyText(
+    quotedContent.conversation,
+    quotedContent.extendedTextMessage?.text,
+    quotedContent.extendedTextMessage?.matchedText,
+    quotedContent.extendedTextMessage?.canonicalUrl,
+    quotedContent.imageMessage?.caption,
+    quotedContent.videoMessage?.caption,
+    quotedContent.documentMessage?.caption,
+    quotedContent.buttonsMessage?.contentText,
+    quotedContent.buttonsMessage?.footerText,
+    quotedContent.listMessage?.title,
+    quotedContent.listMessage?.description,
+    quotedContent.listMessage?.footerText,
+    quotedContent.hydratedContentText,
+    quotedContent.hydratedFooterText,
+    quotedContent.templateMessage?.hydratedTemplate?.hydratedContentText,
+    quotedContent.templateMessage?.hydratedTemplate?.hydratedFooterText,
+  );
+  if (text) return text;
+
+  if (quotedContent.imageMessage) return '[image received]';
+  if (quotedContent.videoMessage) return '[video received]';
+  if (quotedContent.audioMessage || quotedContent.pttMessage) return '[audio received]';
+  if (quotedContent.stickerMessage) return '[sticker received]';
+  if (quotedContent.documentMessage) {
+    return quotedContent.documentMessage.fileName
+      ? `[document received: ${quotedContent.documentMessage.fileName}]`
+      : '[document received]';
+  }
+  return '';
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
@@ -334,6 +381,7 @@ async function startSocket() {
       const quotedParticipant = normalizeWhatsAppId(contextInfo?.participant || '') || null;
       const quotedRemoteJid = normalizeWhatsAppId(contextInfo?.remoteJid || '') || null;
       const hasQuotedMessage = !!contextInfo?.quotedMessage;
+      const quotedText = hasQuotedMessage ? extractQuotedText(contextInfo.quotedMessage) : '';
       const replyToBot = isReplyToBot({ quotedMessageId, quotedParticipant, quotedRemoteJid, botIds });
 
       // Extract message body
@@ -450,6 +498,7 @@ async function startSocket() {
         quotedParticipant,
         quotedRemoteJid,
         hasQuotedMessage,
+        quotedText,
         replyToBot,
         botIds,
         timestamp: msg.messageTimestamp,

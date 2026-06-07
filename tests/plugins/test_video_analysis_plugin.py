@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+def _default_summary_path(tools, cache_dir: Path) -> Path:
+    config = tools.VideoAnalysisConfig(cache_dir=cache_dir.parent)
+    frame_spec = tools._resolve_frame_spec({}, config)
+    return cache_dir / f"summary_v{tools.VIDEO_SUMMARY_SCHEMA_VERSION}_{frame_spec['signature']}.json"
 
 
 def test_register_wires_tool_and_aux_task():
@@ -104,6 +111,41 @@ def test_frame_sampling_uses_transcript_segments_when_available():
     }
 
     assert _sample_times(100, spec, transcription) == [1, 15, 45]
+
+
+def test_frame_spec_signature_busts_old_low_resolution_frame_cache(tmp_path):
+    from plugins.video_analysis import tools
+
+    spec = tools._resolve_frame_spec({}, tools.VideoAnalysisConfig(cache_dir=tmp_path))
+
+    assert spec["signature"].startswith("frames-v2_")
+    assert spec["extraction_version"] == tools.FRAME_EXTRACTION_SCHEMA_VERSION
+    assert spec["analysis_box_size"] == tools.FRAME_ANALYSIS_BOX_SIZE
+
+
+def test_extract_frame_scales_frames_for_vision(tmp_path, monkeypatch):
+    from plugins.video_analysis import tools
+
+    output_path = tmp_path / "frame.jpg"
+    captured = {}
+
+    def fake_run(command, **_kwargs):
+        captured["command"] = command
+        output_path.write_bytes(b"jpeg")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    tools._extract_frame(tmp_path / "source.mp4", output_path, 0.25)
+
+    command = captured["command"]
+    scale_filter = (
+        f"scale={tools.FRAME_ANALYSIS_BOX_SIZE}:{tools.FRAME_ANALYSIS_BOX_SIZE}:"
+        "force_original_aspect_ratio=decrease:flags=lanczos"
+    )
+    assert "-vf" in command
+    assert scale_filter in command
 
 
 def test_compact_metadata_limits_description_and_comments():
@@ -294,7 +336,7 @@ async def test_cached_summary_short_circuits_processing(tmp_path, monkeypatch):
     cache_key = tools._cache_key(url)
     cache_dir = tmp_path / cache_key
     cache_dir.mkdir(parents=True)
-    summary_path = cache_dir / "summary_v3_count_5_10_24.json"
+    summary_path = _default_summary_path(tools, cache_dir)
     summary_path.write_text(
         json.dumps({"success": True, "summary": "cached", "transcript": "full"}),
         encoding="utf-8",
@@ -328,7 +370,7 @@ async def test_cached_summary_can_return_transcript_from_transcript_cache(tmp_pa
         json.dumps({"success": True, "transcript": "full cached transcript"}),
         encoding="utf-8",
     )
-    summary_path = cache_dir / "summary_v3_count_5_10_24.json"
+    summary_path = _default_summary_path(tools, cache_dir)
     summary_path.write_text(
         json.dumps({
             "success": True,

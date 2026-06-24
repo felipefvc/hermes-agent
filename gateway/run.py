@@ -1363,6 +1363,104 @@ def _build_media_placeholder(event) -> str:
     return "\n".join(parts)
 
 
+_GATEWAY_VIDEO_FILE_EXTENSIONS = {
+    ".3gp",
+    ".avi",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".mp4",
+    ".mpeg",
+    ".mpg",
+    ".webm",
+}
+
+_GATEWAY_VIDEO_REQUEST_FALLBACK_RE = re.compile(
+    r"(?ix)"
+    r"\b("
+    r"summar(?:y|ize|ise)|resum(?:e|a|o|ir)|"
+    r"transcri(?:be|pt|ption)|transcri(?:ção|cao|va|ver)|"
+    r"transcrev(?:a|e|er)|"
+    r"analy(?:ze|se|sis)|analis(?:a|e|ar|ando)|an[áa]lise|"
+    r"describe|descri(?:be|ba|ver|ção|cao)|"
+    r"inspect|watch|assist(?:a|ir)|veja|v[êe]|olha|olhe|"
+    r"confere|confira|look\s+at|take\s+a\s+look|"
+    r"d[áa]\s+uma\s+olhada|"
+    r"explain|explic(?:a|ar|que)|break\s*down|"
+    r"tell\s+me\s+about|thoughts?(?:\s+on)?|comment(?:a|e|ar)?|"
+    r"extract|quote|chapter|"
+    r"what(?:'s|\s+(?:does|is|are))|what\s+do\s+you\s+think|"
+    r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)|"
+    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)|"
+    r"o\s+que\s+(?:voc[êe]|vc)\s+acha|"
+    r"que\s+(?:porra\s+)?(?:[ée]|eh)\s+(?:isso|essa|esse)"
+    r")\b"
+)
+
+_GATEWAY_VIDEO_HOST_FALLBACK_RE = re.compile(
+    r"(?i)\b(?:https?://)?(?:www\.)?"
+    r"(?:youtube\.com|youtu\.be|tiktok\.com|instagram\.com|"
+    r"facebook\.com|fb\.watch|x\.com|twitter\.com|vimeo\.com)/\S+"
+)
+
+
+def _gateway_message_explicitly_requests_video_analysis(text: str) -> bool:
+    try:
+        from plugins.video_analysis.tools import message_explicitly_requests_video_analysis
+
+        return message_explicitly_requests_video_analysis(text or "")
+    except Exception:
+        text_without_urls = re.sub(r"https?://[^\s<>\]\)\"']+", " ", text or "")
+        return bool(_GATEWAY_VIDEO_REQUEST_FALLBACK_RE.search(text_without_urls))
+
+
+def _gateway_text_contains_supported_video_url(text: str) -> bool:
+    try:
+        from plugins.video_analysis.tools import text_contains_supported_video_url
+
+        if text_contains_supported_video_url(text or ""):
+            return True
+    except Exception:
+        pass
+    return bool(_GATEWAY_VIDEO_HOST_FALLBACK_RE.search(text or ""))
+
+
+def _gateway_event_has_video_attachment(event) -> bool:
+    if getattr(event, "message_type", None) == MessageType.VIDEO:
+        return True
+
+    media_types = getattr(event, "media_types", None) or []
+    if any(str(mtype or "").lower().startswith("video/") for mtype in media_types):
+        return True
+
+    media_urls = getattr(event, "media_urls", None) or []
+    for path in media_urls:
+        try:
+            suffix = Path(str(path)).suffix.lower()
+        except Exception:
+            suffix = ""
+        if suffix in _GATEWAY_VIDEO_FILE_EXTENSIONS:
+            return True
+    return False
+
+
+def _is_implicit_video_share_without_request(event, raw_user_message_text: str) -> bool:
+    """Return True when a gateway turn should be observed but not dispatched."""
+
+    raw_text = raw_user_message_text if raw_user_message_text is not None else getattr(event, "text", "")
+    has_video = (
+        _gateway_text_contains_supported_video_url(raw_text or "")
+        or _gateway_event_has_video_attachment(event)
+    )
+    if not has_video:
+        return False
+    return not _gateway_message_explicitly_requests_video_analysis(raw_text or "")
+
+
+def _transcript_has_session_meta(history: List[Dict[str, Any]]) -> bool:
+    return any((msg or {}).get("role") == "session_meta" for msg in history or [])
+
+
 def _format_duration(seconds: float) -> str:
     total = int(round(seconds))
     if total < 0:
@@ -8473,6 +8571,27 @@ class GatewayRunner:
 
         return message_text
 
+    def _append_observed_gateway_user_turn(
+        self,
+        *,
+        session_entry,
+        session_key: str,
+        event: MessageEvent,
+        message_text: str,
+    ) -> None:
+        ts = datetime.now().isoformat()
+        entry = {
+            "role": "user",
+            "content": message_text,
+            "timestamp": ts,
+            "observed": True,
+        }
+        if event.message_id:
+            entry["message_id"] = str(event.message_id)
+        self.session_store.append_to_transcript(session_entry.session_id, entry)
+        if session_key:
+            self.session_store.update_session(session_key)
+
     def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
         if not pending_native:
@@ -8601,9 +8720,10 @@ class GatewayRunner:
         context = build_session_context(source, self.config, session_entry)
         
         # Set session context variables for tools (task-local, concurrency-safe)
+        raw_user_message_text = event.text or ""
         _session_env_tokens = self._set_session_env(
             context,
-            current_user_message=event.text or "",
+            current_user_message=raw_user_message_text,
         )
         
         # Read privacy.redact_pii from config (re-read per message)
@@ -9090,13 +9210,39 @@ class GatewayRunner:
         # attachments (documents, audio, etc.) are not sent to the vision
         # tool even when they appear in the same message.
         # -----------------------------------------------------------------
+        if _is_implicit_video_share_without_request(event, raw_user_message_text):
+            observed_event = dataclasses.replace(event, text=raw_user_message_text)
+            observed_message_text = await self._prepare_inbound_message_text(
+                event=observed_event,
+                source=source,
+                history=history,
+            )
+            if observed_message_text is None:
+                self._clear_session_env(_session_env_tokens)
+                return None
+            self._append_observed_gateway_user_turn(
+                session_entry=session_entry,
+                session_key=session_key,
+                event=observed_event,
+                message_text=observed_message_text,
+            )
+            logger.info(
+                "implicit video share observed without agent dispatch: platform=%s chat=%s session=%s",
+                _platform_name,
+                source.chat_id or "unknown",
+                session_entry.session_id,
+            )
+            self._clear_session_env(_session_env_tokens)
+            return None
+
         message_text = await self._prepare_inbound_message_text(
             event=event,
             source=source,
             history=history,
         )
         if message_text is None:
-            return
+            self._clear_session_env(_session_env_tokens)
+            return None
 
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
@@ -9379,7 +9525,7 @@ class GatewayRunner:
             # -- the same list of dicts sent as tools=[...] in the API request.
             if is_context_overflow_failure:
                 pass  # Skip all transcript writes — don't grow a broken session
-            elif not history:
+            elif not _transcript_has_session_meta(history):
                 tool_defs = agent_result.get("tools", [])
                 self.session_store.append_to_transcript(
                     session_entry.session_id,

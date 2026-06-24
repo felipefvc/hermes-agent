@@ -80,13 +80,33 @@ def test_pre_tool_call_allows_explicit_gateway_video_request():
     assert result is None
 
 
-def test_pre_tool_call_allows_later_reference_without_current_url():
+def test_pre_tool_call_blocks_later_reference_without_explicit_request():
     from gateway.session_context import clear_session_vars, set_session_vars
     from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
 
     tokens = set_session_vars(
         platform="whatsapp",
         current_user_message="do that one from before",
+    )
+    try:
+        result = maybe_block_implicit_video_tool_call(
+            tool_name="video_download_analyze",
+            args={"url": "https://youtu.be/abc12345678"},
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result is not None
+    assert result["action"] == "block"
+
+
+def test_pre_tool_call_allows_later_explicit_reference_without_current_url():
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
+
+    tokens = set_session_vars(
+        platform="whatsapp",
+        current_user_message="Comrad, resuma aquele vídeo de antes",
     )
     try:
         result = maybe_block_implicit_video_tool_call(
@@ -111,6 +131,45 @@ def test_pre_tool_call_allows_natural_explicit_video_request():
         result = maybe_block_implicit_video_tool_call(
             tool_name="video_download_analyze",
             args={"url": "https://youtu.be/abc12345678"},
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result is None
+
+
+def test_pre_tool_call_blocks_local_video_path_without_explicit_request():
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
+
+    tokens = set_session_vars(
+        platform="whatsapp",
+        current_user_message="Bingo",
+    )
+    try:
+        result = maybe_block_implicit_video_tool_call(
+            tool_name="video_download_analyze",
+            args={"video_path": "/tmp/video.mp4"},
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result is not None
+    assert result["action"] == "block"
+
+
+def test_pre_tool_call_allows_local_video_path_with_explicit_request():
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
+
+    tokens = set_session_vars(
+        platform="whatsapp",
+        current_user_message="transcreve esse vídeo",
+    )
+    try:
+        result = maybe_block_implicit_video_tool_call(
+            tool_name="video_download_analyze",
+            args={"video_path": "/tmp/video.mp4"},
         )
     finally:
         clear_session_vars(tokens)

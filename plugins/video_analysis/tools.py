@@ -79,15 +79,20 @@ _VIDEO_REQUEST_RE = re.compile(
     r"\b("
     r"summar(?:y|ize|ise)|resum(?:e|a|o|ir)|"
     r"transcri(?:be|pt|ption)|transcri(?:ção|cao|va|ver)|"
+    r"transcrev(?:a|e|er)|"
     r"analy(?:ze|se|sis)|analis(?:a|e|ar|ando)|an[áa]lise|"
     r"describe|descri(?:be|ba|ver|ção|cao)|"
-    r"inspect|watch|assist(?:a|ir)|veja|look\s+at|"
+    r"inspect|watch|assist(?:a|ir)|veja|v[êe]|olha|olhe|"
+    r"confere|confira|look\s+at|take\s+a\s+look|"
+    r"d[áa]\s+uma\s+olhada|"
     r"explain|explic(?:a|ar|que)|break\s*down|"
-    r"tell\s+me\s+about|thoughts?\s+on|comment(?:a|e|ar)?|"
+    r"tell\s+me\s+about|thoughts?(?:\s+on)?|comment(?:a|e|ar)?|"
     r"extract|quote|chapter|"
     r"what(?:'s|\s+(?:does|is|are))|what\s+do\s+you\s+think|"
     r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)|"
-    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)"
+    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)|"
+    r"o\s+que\s+(?:voc[êe]|vc)\s+acha|"
+    r"que\s+(?:porra\s+)?(?:[ée]|eh)\s+(?:isso|essa|esse)"
     r")\b"
 )
 
@@ -266,8 +271,6 @@ def maybe_block_implicit_video_tool_call(
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
     current_message = get_session_env("HERMES_CURRENT_USER_MESSAGE", "")
     if not platform or not current_message:
-        return None
-    if not text_contains_supported_video_url(current_message):
         return None
     if message_explicitly_requests_video_analysis(current_message):
         return None

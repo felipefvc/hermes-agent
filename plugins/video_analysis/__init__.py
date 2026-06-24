@@ -12,6 +12,8 @@ from plugins.video_analysis.tools import (
     VIDEO_ANALYSIS_TOOL_NAME,
     VideoAnalysisService,
     check_video_analysis_requirements,
+    maybe_block_implicit_video_tool_call,
+    maybe_skip_implicit_video_gateway_event,
 )
 
 
@@ -37,5 +39,7 @@ def register(ctx) -> None:
         handler=service.handle,
         check_fn=check_video_analysis_requirements,
         is_async=True,
-        description="Download, transcribe, sample frames, and summarize a social video URL or local video file.",
+        description="When explicitly requested, download, transcribe, sample frames, and summarize a social video URL or local video file.",
     )
+    ctx.register_hook("pre_gateway_dispatch", maybe_skip_implicit_video_gateway_event)
+    ctx.register_hook("pre_tool_call", maybe_block_implicit_video_tool_call)

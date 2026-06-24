@@ -8601,7 +8601,10 @@ class GatewayRunner:
         context = build_session_context(source, self.config, session_entry)
         
         # Set session context variables for tools (task-local, concurrency-safe)
-        _session_env_tokens = self._set_session_env(context)
+        _session_env_tokens = self._set_session_env(
+            context,
+            current_user_message=event.text or "",
+        )
         
         # Read privacy.redact_pii from config (re-read per message)
         _redact_pii = False
@@ -14963,7 +14966,7 @@ class GatewayRunner:
 
         return delivered
 
-    def _set_session_env(self, context: SessionContext) -> list:
+    def _set_session_env(self, context: SessionContext, current_user_message: str = "") -> list:
         """Set session context variables for the current async task.
 
         Uses ``contextvars`` instead of ``os.environ`` so that concurrent
@@ -14982,6 +14985,7 @@ class GatewayRunner:
             user_name=str(context.source.user_name) if context.source.user_name else "",
             session_key=context.session_key,
             message_id=str(context.source.message_id) if context.source.message_id else "",
+            current_user_message=current_user_message or "",
         )
 
     def _clear_session_env(self, tokens: list) -> None:

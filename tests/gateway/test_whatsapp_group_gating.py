@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -6,7 +7,8 @@ import pytest
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 
 
-def _make_adapter(require_mention=None, mention_patterns=None, free_response_chats=None,
+def _make_adapter(require_mention=None, mention_patterns=None, mention_names=None,
+                  free_response_chats=None, observe_untriggered_group_messages=None,
                   dm_policy=None, allow_from=None, group_policy=None, group_allow_from=None):
     from gateway.platforms.whatsapp import WhatsAppAdapter
 
@@ -15,8 +17,12 @@ def _make_adapter(require_mention=None, mention_patterns=None, free_response_cha
         extra["require_mention"] = require_mention
     if mention_patterns is not None:
         extra["mention_patterns"] = mention_patterns
+    if mention_names is not None:
+        extra["mention_names"] = mention_names
     if free_response_chats is not None:
         extra["free_response_chats"] = free_response_chats
+    if observe_untriggered_group_messages is not None:
+        extra["observe_untriggered_group_messages"] = observe_untriggered_group_messages
     if dm_policy is not None:
         extra["dm_policy"] = dm_policy
     if allow_from is not None:
@@ -34,6 +40,7 @@ def _make_adapter(require_mention=None, mention_patterns=None, free_response_cha
     adapter._allow_from = WhatsAppAdapter._coerce_allow_list(extra.get("allow_from"))
     adapter._group_policy = str(extra.get("group_policy", "open")).strip().lower()
     adapter._group_allow_from = WhatsAppAdapter._coerce_allow_list(extra.get("group_allow_from"))
+    adapter._mention_names = WhatsAppAdapter._coerce_string_list(extra.get("mention_names"))
     adapter._mention_patterns = adapter._compile_mention_patterns()
     adapter._free_response_chats = adapter._whatsapp_free_response_chats()
     return adapter
@@ -47,6 +54,9 @@ def _group_message(body="hello", **overrides):
         "mentionedIds": [],
         "botIds": ["15551230000@s.whatsapp.net", "15551230000@lid"],
         "quotedParticipant": "",
+        "senderId": "5511999999999@s.whatsapp.net",
+        "senderName": "Felipe",
+        "messageId": "wamid.test",
     }
     data.update(overrides)
     return data
@@ -107,28 +117,46 @@ def test_invalid_regex_patterns_are_ignored():
     assert adapter._should_process_message(_group_message("hello everyone")) is False
 
 
+def test_literal_mention_names_allow_custom_wake_words_without_regex():
+    adapter = _make_adapter(require_mention=True, mention_names=["Comrad"])
+
+    assert adapter._should_process_message(_group_message("Comrad, resuma isso")) is True
+    assert adapter._should_process_message(_group_message("hey comrad")) is True
+    assert adapter._should_process_message(_group_message("comrade energy")) is False
+    assert adapter._should_process_message(_group_message("antiComrad discourse")) is False
+
+
 def test_config_bridges_whatsapp_group_settings(monkeypatch, tmp_path):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     (hermes_home / "config.yaml").write_text(
         "whatsapp:\n"
         "  require_mention: true\n"
+        "  mention_names:\n"
+        "    - Comrad\n"
         "  mention_patterns:\n"
-        "    - \"^\\\\s*chompy\\\\b\"\n",
+        "    - \"^\\\\s*chompy\\\\b\"\n"
+        "  observe_untriggered_group_messages: true\n",
         encoding="utf-8",
     )
 
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("WHATSAPP_REQUIRE_MENTION", raising=False)
+    monkeypatch.delenv("WHATSAPP_MENTION_NAMES", raising=False)
     monkeypatch.delenv("WHATSAPP_MENTION_PATTERNS", raising=False)
+    monkeypatch.delenv("WHATSAPP_OBSERVE_UNTRIGGERED_GROUP_MESSAGES", raising=False)
 
     config = load_gateway_config()
 
     assert config is not None
     assert config.platforms[Platform.WHATSAPP].extra["require_mention"] is True
+    assert config.platforms[Platform.WHATSAPP].extra["mention_names"] == ["Comrad"]
     assert config.platforms[Platform.WHATSAPP].extra["mention_patterns"] == [r"^\s*chompy\b"]
+    assert config.platforms[Platform.WHATSAPP].extra["observe_untriggered_group_messages"] is True
     assert __import__("os").environ["WHATSAPP_REQUIRE_MENTION"] == "true"
+    assert json.loads(__import__("os").environ["WHATSAPP_MENTION_NAMES"]) == ["Comrad"]
     assert json.loads(__import__("os").environ["WHATSAPP_MENTION_PATTERNS"]) == [r"^\s*chompy\b"]
+    assert __import__("os").environ["WHATSAPP_OBSERVE_UNTRIGGERED_GROUP_MESSAGES"] == "true"
 
 
 def test_free_response_chats_bypass_mention_gating():
@@ -147,6 +175,110 @@ def test_free_response_chats_does_not_bypass_other_groups():
     )
 
     assert adapter._should_process_message(_group_message("hello everyone")) is False
+
+
+def test_untriggered_allowed_group_message_is_observed_not_dispatched():
+    adapter = _make_adapter(
+        require_mention=True,
+        mention_names=["Comrad"],
+        observe_untriggered_group_messages=True,
+        group_policy="allowlist",
+        group_allow_from=["120363001234567890@g.us"],
+    )
+
+    msg = _group_message("https://youtu.be/siHfHUm3HGE")
+
+    assert adapter._should_process_message(msg) is False
+    assert adapter._should_observe_untriggered_group_message(msg) is True
+
+
+@pytest.mark.asyncio
+async def test_observed_whatsapp_group_message_persists_in_shared_session():
+    adapter = _make_adapter(
+        require_mention=True,
+        mention_names=["Comrad"],
+        observe_untriggered_group_messages=True,
+        group_policy="allowlist",
+        group_allow_from=["120363001234567890@g.us"],
+    )
+
+    class Store:
+        def __init__(self):
+            self.source = None
+            self.messages = []
+            self.updated = []
+
+        def get_or_create_session(self, source):
+            self.source = source
+            return SimpleNamespace(session_id="sid-1", session_key="session-key")
+
+        def append_to_transcript(self, session_id, message):
+            self.messages.append((session_id, message))
+
+        def update_session(self, session_key):
+            self.updated.append(session_key)
+
+    store = Store()
+    adapter._session_store = store
+
+    event = await adapter._build_message_event(
+        _group_message(
+            "https://youtu.be/siHfHUm3HGE",
+            messageId="wamid.youtube",
+        )
+    )
+    assert event is not None
+
+    adapter._observe_untriggered_group_message(event)
+
+    assert store.source.user_id is None
+    assert store.source.chat_id == "120363001234567890@g.us"
+    assert store.messages[0][0] == "sid-1"
+    observed = store.messages[0][1]
+    assert observed["observed"] is True
+    assert observed["message_id"] == "wamid.youtube"
+    assert "[Felipe|5511999999999@s.whatsapp.net]" in observed["content"]
+    assert "https://youtu.be/siHfHUm3HGE" in observed["content"]
+    assert store.updated == ["session-key"]
+
+
+@pytest.mark.asyncio
+async def test_triggered_whatsapp_group_message_uses_shared_observed_context():
+    adapter = _make_adapter(
+        require_mention=True,
+        mention_names=["Comrad"],
+        observe_untriggered_group_messages=True,
+        group_policy="allowlist",
+        group_allow_from=["120363001234567890@g.us"],
+    )
+
+    event = await adapter._build_message_event(_group_message("Comrad, resuma o vídeo anterior"))
+    assert event is not None
+
+    attributed = adapter._apply_whatsapp_group_observe_attribution(event)
+
+    assert attributed.source.user_id is None
+    assert attributed.text.startswith("[Felipe|5511999999999@s.whatsapp.net]\n")
+    assert "resuma o vídeo anterior" in attributed.text
+    assert "Comrad" not in attributed.text
+    assert "observed WhatsApp group context" in attributed.channel_prompt
+
+
+def test_observed_whatsapp_group_context_is_api_only():
+    from gateway.run import _build_gateway_agent_history
+
+    history = [
+        {"role": "user", "content": "[Alice|1]\nhttps://youtu.be/abc", "observed": True},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+    agent_history, observed_context = _build_gateway_agent_history(
+        history,
+        channel_prompt="observed WhatsApp group context",
+    )
+
+    assert observed_context == "[Alice|1]\nhttps://youtu.be/abc"
+    assert agent_history == [{"role": "assistant", "content": "old answer"}]
 
 
 def test_dm_passes_with_default_open_policy():

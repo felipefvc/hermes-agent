@@ -74,42 +74,6 @@ MAX_TRANSCRIPT_PROMPT_CHARS = 30000
 MAX_FRAME_ANALYSIS_PROMPT_CHARS = 16000
 VIDEO_ANALYSIS_TOOL_NAME = "video_download_analyze"
 
-_VIDEO_REQUEST_RE = re.compile(
-    r"(?ix)"
-    r"\b("
-    r"summar(?:y|ize|ise)|resum(?:e|a|o|ir)|"
-    r"transcri(?:be|pt|ption)|transcri(?:ção|cao|va|ver)|"
-    r"transcrev(?:a|e|er)|"
-    r"analy(?:ze|se|sis)|analis(?:a|e|ar|ando)|an[áa]lise|"
-    r"describe|descri(?:be|ba|ver|ção|cao)|"
-    r"inspect|watch|assist(?:a|ir)|veja|v[êe]|olha|olhe|"
-    r"confere|confira|look\s+at|take\s+a\s+look|"
-    r"d[áa]\s+uma\s+olhada|"
-    r"explain|explic(?:a|ar|que)|break\s*down|"
-    r"tell\s+me\s+about|thoughts?(?:\s+on)?|comment(?:a|e|ar)?|"
-    r"extract|quote|chapter|"
-    r"what(?:'s|\s+(?:does|is|are))|what\s+do\s+you\s+think|"
-    r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)|"
-    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)|"
-    r"o\s+que\s+(?:voc[êe]|vc)\s+acha|"
-    r"que\s+(?:porra\s+)?(?:[ée]|eh)\s+(?:isso|essa|esse)"
-    r")\b"
-)
-
-_VIDEO_URL_HOST_SUFFIXES = (
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "instagram.com",
-    "facebook.com",
-    "fb.watch",
-    "x.com",
-    "twitter.com",
-    "vimeo.com",
-)
-_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+", re.IGNORECASE)
-
-
 VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
     "name": VIDEO_ANALYSIS_TOOL_NAME,
     "description": (
@@ -233,55 +197,6 @@ VIDEO_ANALYZE_SCHEMA: Dict[str, Any] = {
         "additionalProperties": False,
     },
 }
-
-
-def message_explicitly_requests_video_analysis(text: str) -> bool:
-    """Return True when the user text asks to inspect video content."""
-    text_without_urls = _URL_RE.sub(" ", text or "")
-    return bool(_VIDEO_REQUEST_RE.search(text_without_urls))
-
-
-def text_contains_supported_video_url(text: str) -> bool:
-    """Detect URLs that the video-analysis tool is likely to handle."""
-    for raw_url in _URL_RE.findall(text or ""):
-        parsed = urlparse(raw_url)
-        host = (parsed.netloc or "").lower()
-        if host.startswith("www."):
-            host = host[4:]
-        if any(host == suffix or host.endswith(f".{suffix}") for suffix in _VIDEO_URL_HOST_SUFFIXES):
-            return True
-    return False
-
-
-def maybe_block_implicit_video_tool_call(
-    tool_name: str = "",
-    args: Any = None,
-    **_: Any,
-) -> Optional[Dict[str, str]]:
-    """Refuse analysis for a bare video URL in the current gateway turn."""
-    if tool_name != VIDEO_ANALYSIS_TOOL_NAME or not isinstance(args, dict):
-        return None
-    if not (args.get("url") or args.get("video_path")):
-        return None
-    try:
-        from gateway.session_context import get_session_env
-    except Exception:
-        return None
-
-    platform = get_session_env("HERMES_SESSION_PLATFORM", "")
-    current_message = get_session_env("HERMES_CURRENT_USER_MESSAGE", "")
-    if not platform or not current_message:
-        return None
-    if message_explicitly_requests_video_analysis(current_message):
-        return None
-    return {
-        "action": "block",
-        "message": (
-            "video_download_analyze was blocked because the current gateway "
-            "message shared a video/link without explicitly asking Hermes to "
-            "summarize, transcribe, describe, inspect, or analyze it."
-        ),
-    }
 
 
 @dataclass(frozen=True)

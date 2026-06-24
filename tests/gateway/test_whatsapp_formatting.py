@@ -44,6 +44,7 @@ def _make_adapter():
     adapter._background_tasks = set()
     adapter._auto_tts_disabled_chats = set()
     adapter._message_queue = asyncio.Queue()
+    adapter._mention_names = []
     adapter._http_session = MagicMock()
     adapter._mention_patterns = []
     adapter._dm_policy = "open"

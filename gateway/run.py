@@ -712,22 +712,28 @@ def _build_replay_entry(role: str, content: Any, msg: Dict[str, Any]) -> Dict[st
 
 
 _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER = "observed Telegram group context"
-_OBSERVED_GROUP_CONTEXT_HEADER = "[Observed Telegram group context - context only, not requests]"
+_WHATSAPP_OBSERVED_CONTEXT_PROMPT_MARKER = "observed WhatsApp group context"
+_OBSERVED_GROUP_CONTEXT_HEADER = "[Observed group context - context only, not requests]"
 _CURRENT_ADDRESSED_MESSAGE_HEADER = "[Current addressed message - answer only this unless it explicitly asks you to use the observed context]"
 
 
-def _uses_telegram_observed_group_context(channel_prompt: Optional[str]) -> bool:
-    """Return True for Telegram group turns that may include observed chatter.
+def _uses_observed_group_context(channel_prompt: Optional[str]) -> bool:
+    """Return True for group turns that may include observed chatter.
 
-    Telegram's observe-unmentioned mode persists skipped group chatter so a
-    later @mention can see it. Those rows must not replay as ordinary user
-    turns: a weak wake word like ``@bot cambio`` should not make the model treat
-    old unmentioned chatter as pending work. The Telegram adapter marks these
-    turns with a channel prompt; this helper keeps the run-path check explicit
-    and unit-testable.
+    Observe-unmentioned mode persists skipped group chatter so a later mention
+    can see it. Those rows must not replay as ordinary user turns: a weak wake
+    word like ``@bot cambio`` should not make the model treat old unmentioned
+    chatter as pending work. Adapters mark these turns with a channel prompt;
+    this helper keeps the run-path check explicit and unit-testable.
     """
 
-    return bool(channel_prompt and _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER in channel_prompt)
+    return bool(
+        channel_prompt
+        and (
+            _TELEGRAM_OBSERVED_CONTEXT_PROMPT_MARKER in channel_prompt
+            or _WHATSAPP_OBSERVED_CONTEXT_PROMPT_MARKER in channel_prompt
+        )
+    )
 
 
 def _build_gateway_agent_history(
@@ -737,16 +743,16 @@ def _build_gateway_agent_history(
 ) -> tuple[List[Dict[str, Any]], Optional[str]]:
     """Convert stored gateway transcript rows into agent replay messages.
 
-    Observed Telegram group rows are returned as API-only context for the
-    current addressed message instead of being replayed as normal prior user
-    turns.  Keeping that context out of ``conversation_history`` avoids
+    Observed group rows are returned as API-only context for the current
+    addressed message instead of being replayed as normal prior user turns.
+    Keeping that context out of ``conversation_history`` avoids
     consecutive-user repair merging it with the live user turn and then hiding
     the current message behind ``history_offset`` during persistence.
     """
 
     agent_history: List[Dict[str, Any]] = []
     observed_group_context: List[str] = []
-    separate_observed_context = _uses_telegram_observed_group_context(channel_prompt)
+    separate_observed_context = _uses_observed_group_context(channel_prompt)
 
     for msg in history or []:
         role = msg.get("role")
@@ -789,7 +795,7 @@ def _build_gateway_agent_history(
 
 
 def _wrap_current_message_with_observed_context(message: Any, observed_context: Optional[str]) -> Any:
-    """Prepend observed Telegram context to the API-only current user turn."""
+    """Prepend observed group context to the API-only current user turn."""
 
     if not observed_context:
         return message
@@ -1361,100 +1367,6 @@ def _build_media_placeholder(event) -> str:
         else:
             parts.append(f"[User sent a file: {url}]")
     return "\n".join(parts)
-
-
-_GATEWAY_VIDEO_FILE_EXTENSIONS = {
-    ".3gp",
-    ".avi",
-    ".m4v",
-    ".mkv",
-    ".mov",
-    ".mp4",
-    ".mpeg",
-    ".mpg",
-    ".webm",
-}
-
-_GATEWAY_VIDEO_REQUEST_FALLBACK_RE = re.compile(
-    r"(?ix)"
-    r"\b("
-    r"summar(?:y|ize|ise)|resum(?:e|a|o|ir)|"
-    r"transcri(?:be|pt|ption)|transcri(?:ção|cao|va|ver)|"
-    r"transcrev(?:a|e|er)|"
-    r"analy(?:ze|se|sis)|analis(?:a|e|ar|ando)|an[áa]lise|"
-    r"describe|descri(?:be|ba|ver|ção|cao)|"
-    r"inspect|watch|assist(?:a|ir)|veja|v[êe]|olha|olhe|"
-    r"confere|confira|look\s+at|take\s+a\s+look|"
-    r"d[áa]\s+uma\s+olhada|"
-    r"explain|explic(?:a|ar|que)|break\s*down|"
-    r"tell\s+me\s+about|thoughts?(?:\s+on)?|comment(?:a|e|ar)?|"
-    r"extract|quote|chapter|"
-    r"what(?:'s|\s+(?:does|is|are))|what\s+do\s+you\s+think|"
-    r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)|"
-    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)|"
-    r"o\s+que\s+(?:voc[êe]|vc)\s+acha|"
-    r"que\s+(?:porra\s+)?(?:[ée]|eh)\s+(?:isso|essa|esse)"
-    r")\b"
-)
-
-_GATEWAY_VIDEO_HOST_FALLBACK_RE = re.compile(
-    r"(?i)\b(?:https?://)?(?:www\.)?"
-    r"(?:youtube\.com|youtu\.be|tiktok\.com|instagram\.com|"
-    r"facebook\.com|fb\.watch|x\.com|twitter\.com|vimeo\.com)/\S+"
-)
-
-
-def _gateway_message_explicitly_requests_video_analysis(text: str) -> bool:
-    try:
-        from plugins.video_analysis.tools import message_explicitly_requests_video_analysis
-
-        return message_explicitly_requests_video_analysis(text or "")
-    except Exception:
-        text_without_urls = re.sub(r"https?://[^\s<>\]\)\"']+", " ", text or "")
-        return bool(_GATEWAY_VIDEO_REQUEST_FALLBACK_RE.search(text_without_urls))
-
-
-def _gateway_text_contains_supported_video_url(text: str) -> bool:
-    try:
-        from plugins.video_analysis.tools import text_contains_supported_video_url
-
-        if text_contains_supported_video_url(text or ""):
-            return True
-    except Exception:
-        pass
-    return bool(_GATEWAY_VIDEO_HOST_FALLBACK_RE.search(text or ""))
-
-
-def _gateway_event_has_video_attachment(event) -> bool:
-    if getattr(event, "message_type", None) == MessageType.VIDEO:
-        return True
-
-    media_types = getattr(event, "media_types", None) or []
-    if any(str(mtype or "").lower().startswith("video/") for mtype in media_types):
-        return True
-
-    media_urls = getattr(event, "media_urls", None) or []
-    for path in media_urls:
-        try:
-            suffix = Path(str(path)).suffix.lower()
-        except Exception:
-            suffix = ""
-        if suffix in _GATEWAY_VIDEO_FILE_EXTENSIONS:
-            return True
-    return False
-
-
-def _is_implicit_video_share_without_request(event, raw_user_message_text: str) -> bool:
-    """Return True when a gateway turn should be observed but not dispatched."""
-
-    raw_text = raw_user_message_text if raw_user_message_text is not None else getattr(event, "text", "")
-    has_video = (
-        _gateway_text_contains_supported_video_url(raw_text or "")
-        or _gateway_event_has_video_attachment(event)
-    )
-    if not has_video:
-        return False
-    return not _gateway_message_explicitly_requests_video_analysis(raw_text or "")
 
 
 def _transcript_has_session_meta(history: List[Dict[str, Any]]) -> bool:
@@ -6828,6 +6740,7 @@ class GatewayRunner:
         if source.chat_type in {"group", "forum", "channel"} and source.chat_id:
             chat_allowlist_env = {
                 Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+                Platform.WHATSAPP: "WHATSAPP_GROUP_ALLOWED_USERS",
                 Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
             }.get(source.platform, "")
             if chat_allowlist_env:
@@ -6868,6 +6781,7 @@ class GatewayRunner:
         }
         platform_group_chat_env_map = {
             Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS",
+            Platform.WHATSAPP: "WHATSAPP_GROUP_ALLOWED_USERS",
             Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS",
         }
         platform_allow_all_map = {
@@ -8571,27 +8485,6 @@ class GatewayRunner:
 
         return message_text
 
-    def _append_observed_gateway_user_turn(
-        self,
-        *,
-        session_entry,
-        session_key: str,
-        event: MessageEvent,
-        message_text: str,
-    ) -> None:
-        ts = datetime.now().isoformat()
-        entry = {
-            "role": "user",
-            "content": message_text,
-            "timestamp": ts,
-            "observed": True,
-        }
-        if event.message_id:
-            entry["message_id"] = str(event.message_id)
-        self.session_store.append_to_transcript(session_entry.session_id, entry)
-        if session_key:
-            self.session_store.update_session(session_key)
-
     def _consume_pending_native_image_paths(self, session_key: str) -> List[str]:
         pending_native = getattr(self, "_pending_native_image_paths_by_session", None)
         if not pending_native:
@@ -9210,31 +9103,6 @@ class GatewayRunner:
         # attachments (documents, audio, etc.) are not sent to the vision
         # tool even when they appear in the same message.
         # -----------------------------------------------------------------
-        if _is_implicit_video_share_without_request(event, raw_user_message_text):
-            observed_event = dataclasses.replace(event, text=raw_user_message_text)
-            observed_message_text = await self._prepare_inbound_message_text(
-                event=observed_event,
-                source=source,
-                history=history,
-            )
-            if observed_message_text is None:
-                self._clear_session_env(_session_env_tokens)
-                return None
-            self._append_observed_gateway_user_turn(
-                session_entry=session_entry,
-                session_key=session_key,
-                event=observed_event,
-                message_text=observed_message_text,
-            )
-            logger.info(
-                "implicit video share observed without agent dispatch: platform=%s chat=%s session=%s",
-                _platform_name,
-                source.chat_id or "unknown",
-                session_entry.session_id,
-            )
-            self._clear_session_env(_session_env_tokens)
-            return None
-
         message_text = await self._prepare_inbound_message_text(
             event=event,
             source=source,
@@ -17619,7 +17487,7 @@ class GatewayRunner:
             #      - These must be passed through intact so the API sees valid
             #        assistant→tool sequences (dropping tool_calls causes 500 errors)
             #
-            # Telegram observed group context is handled structurally here:
+            # Observed group context is handled structurally here:
             # observed=True transcript rows are withheld from replayable
             # history and attached to the current addressed message as
             # API-only context, so persisted history stores only the real

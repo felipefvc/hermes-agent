@@ -16,6 +16,7 @@ with different backends via a bridge pattern.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ import subprocess
 
 _IS_WINDOWS = platform.system() == "Windows"
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Dict, Optional, Any
 
 from hermes_constants import get_hermes_dir
@@ -288,6 +290,10 @@ class WhatsAppAdapter(BasePlatformAdapter):
         self._allow_from = self._coerce_allow_list(config.extra.get("allow_from") or config.extra.get("allowFrom"))
         self._group_policy = str(config.extra.get("group_policy") or os.getenv("WHATSAPP_GROUP_POLICY", "open")).strip().lower()
         self._group_allow_from = self._coerce_allow_list(config.extra.get("group_allow_from") or config.extra.get("groupAllowFrom"))
+        self._mention_names = self._coerce_string_list(
+            config.extra.get("mention_names") or config.extra.get("mentionNames"),
+            env_var="WHATSAPP_MENTION_NAMES",
+        )
         self._mention_patterns = self._compile_mention_patterns()
         self._message_queue: asyncio.Queue = asyncio.Queue()
         self._bridge_log_fh = None
@@ -345,6 +351,53 @@ class WhatsAppAdapter(BasePlatformAdapter):
         if isinstance(raw, list):
             return {str(part).strip() for part in raw if str(part).strip()}
         return {part.strip() for part in str(raw).split(",") if part.strip()}
+
+    @staticmethod
+    def _coerce_string_list(raw, *, env_var: str = "") -> list[str]:
+        """Parse literal string lists from config/env while preserving order."""
+        if raw is None and env_var:
+            env_raw = os.getenv(env_var, "").strip()
+            if env_raw:
+                try:
+                    raw = json.loads(env_raw)
+                except Exception:
+                    raw = [part.strip() for part in env_raw.splitlines() if part.strip()]
+                    if not raw:
+                        raw = [part.strip() for part in env_raw.split(",") if part.strip()]
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return []
+        values: list[str] = []
+        seen: set[str] = set()
+        for item in raw:
+            value = str(item or "").strip()
+            key = value.casefold()
+            if value and key not in seen:
+                values.append(value)
+                seen.add(key)
+        return values
+
+    def _whatsapp_observe_untriggered_group_messages(self) -> bool:
+        """Return whether skipped allowed group messages are stored as context."""
+        configured = self.config.extra.get("observe_untriggered_group_messages")
+        if configured is None:
+            configured = self.config.extra.get("observe_unmentioned_group_messages")
+        if configured is not None:
+            if isinstance(configured, str):
+                return configured.lower() in {"true", "1", "yes", "on"}
+            return bool(configured)
+        env_value = os.getenv(
+            "WHATSAPP_OBSERVE_UNTRIGGERED_GROUP_MESSAGES",
+            os.getenv("WHATSAPP_OBSERVE_UNMENTIONED_GROUP_MESSAGES", "false"),
+        )
+        return env_value.lower() in {"true", "1", "yes", "on"}
+
+    def _whatsapp_observe_allowed_chats(self) -> set[str]:
+        """Return group chats where skipped WhatsApp context may be shared."""
+        return set(self._group_allow_from)
 
     @staticmethod
     def _is_broadcast_chat(chat_id: str) -> bool:
@@ -432,7 +485,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return bot_ids
 
     def _message_is_reply_to_bot(self, data: Dict[str, Any]) -> bool:
-        quoted_participant = self._normalize_whatsapp_id(data.get("quotedParticipant"))
+        if data.get("replyToBot") is True:
+            return True
+        quoted_participant = self._normalize_whatsapp_id(
+            data.get("quotedParticipant") or data.get("quotedRemoteJid")
+        )
         if not quoted_participant:
             return False
         return quoted_participant in self._bot_ids_from_message(data)
@@ -457,6 +514,30 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 return True
         return False
 
+    def _message_mentions_name(self, data: Dict[str, Any]) -> bool:
+        if not self._mention_names:
+            return False
+        body = str(data.get("body") or "")
+        if not body:
+            return False
+        folded = body.casefold()
+        for name in self._mention_names:
+            name_folded = name.casefold()
+            if not name_folded:
+                continue
+            start = 0
+            while True:
+                index = folded.find(name_folded, start)
+                if index < 0:
+                    break
+                before = folded[index - 1] if index > 0 else ""
+                after_index = index + len(name_folded)
+                after = folded[after_index] if after_index < len(folded) else ""
+                if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                    return True
+                start = index + len(name_folded)
+        return False
+
     def _message_matches_mention_patterns(self, data: Dict[str, Any]) -> bool:
         if not self._mention_patterns:
             return False
@@ -472,9 +553,18 @@ class WhatsAppAdapter(BasePlatformAdapter):
             bare_id = bot_id.split("@", 1)[0]
             if bare_id:
                 cleaned = re.sub(rf"@{re.escape(bare_id)}\b[,:\-]*\s*", "", cleaned)
+        for name in self._mention_names:
+            if name:
+                cleaned = re.sub(
+                    rf"(?<!\w){re.escape(name)}(?!\w)[,:\-]*\s*",
+                    "",
+                    cleaned,
+                    count=1,
+                    flags=re.IGNORECASE,
+                )
         return cleaned.strip() or text
 
-    def _should_process_message(self, data: Dict[str, Any]) -> bool:
+    def _should_accept_message(self, data: Dict[str, Any]) -> bool:
         chat_id_raw = str(data.get("chatId") or "")
         # WhatsApp uses pseudo-chats for Status updates (Stories) and
         # Channel/Newsletter broadcasts. These are not real conversations
@@ -487,11 +577,19 @@ class WhatsAppAdapter(BasePlatformAdapter):
             chat_id = chat_id_raw
             if not self._is_group_allowed(chat_id):
                 return False
+            return True
         else:
             sender_id = str(data.get("senderId") or data.get("from") or "")
             if not self._is_dm_allowed(sender_id):
                 return False
-            # DMs that pass the policy gate are always processed
+            return True
+
+    def _should_process_message(self, data: Dict[str, Any]) -> bool:
+        if not self._should_accept_message(data):
+            return False
+        is_group = data.get("isGroup", False)
+        # DMs that pass the policy gate are always processed.
+        if not is_group:
             return True
         # Group messages: check mention / free-response settings
         chat_id = str(data.get("chatId") or "")
@@ -506,7 +604,119 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return True
         if self._message_mentions_bot(data):
             return True
+        if self._message_mentions_name(data):
+            return True
         return self._message_matches_mention_patterns(data)
+
+    def _should_observe_untriggered_group_message(self, data: Dict[str, Any]) -> bool:
+        if not self._whatsapp_observe_untriggered_group_messages():
+            return False
+        if not data.get("isGroup", False):
+            return False
+        if not self._should_accept_message(data):
+            return False
+        chat_id = str(data.get("chatId") or "")
+        allowed = self._whatsapp_observe_allowed_chats()
+        if not allowed or chat_id not in allowed:
+            return False
+        return not self._should_process_message(data)
+
+    def _whatsapp_group_observe_shared_source(self, source):
+        """Return a chat-scoped source for shared WhatsApp group context."""
+        return dataclasses.replace(source, user_id=None, user_name=None, user_id_alt=None)
+
+    @staticmethod
+    def _media_placeholder_for_event(event: MessageEvent) -> str:
+        parts: list[str] = []
+        for index, url in enumerate(event.media_urls or []):
+            mtype = event.media_types[index] if index < len(event.media_types) else ""
+            if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
+                parts.append(f"[User sent an image: {url}]")
+            elif mtype.startswith("video/") or event.message_type == MessageType.VIDEO:
+                parts.append(f"[User sent a video: {url}]")
+            elif mtype.startswith("audio/") or event.message_type == MessageType.VOICE:
+                parts.append(f"[User sent audio: {url}]")
+            else:
+                parts.append(f"[User sent a file: {url}]")
+        return "\n".join(parts)
+
+    def _whatsapp_group_observe_attributed_text(self, event: MessageEvent) -> str:
+        user_id = event.source.user_id or "unknown"
+        sender = event.source.user_name or user_id
+        parts: list[str] = []
+        if event.reply_to_text:
+            parts.append(f"[Replying to: {event.reply_to_text}]")
+        if event.text:
+            parts.append(event.text)
+        media_note = self._media_placeholder_for_event(event)
+        if media_note:
+            parts.append(media_note)
+        content = "\n\n".join(part for part in parts if part).strip()
+        return f"[{sender}|{user_id}]\n{content}"
+
+    def _whatsapp_group_observe_channel_prompt(self) -> str:
+        names = ", ".join(self._mention_names) if self._mention_names else "configured name aliases"
+        return (
+            "You are handling a WhatsApp group chat message.\n"
+            f"- @-mentions and replies to your prior messages address you directly; name aliases: {names}.\n"
+            "- observed WhatsApp group context may be provided in a separate context-only block "
+            "before the current message; it is not necessarily addressed to you.\n"
+            "- Treat only the current new message as a request explicitly directed at you, "
+            "and use observed context only when the current message asks for it."
+        )
+
+    def _apply_whatsapp_group_observe_attribution(self, event: MessageEvent) -> MessageEvent:
+        raw_message = getattr(event, "raw_message", None)
+        if not isinstance(raw_message, dict) or not raw_message.get("isGroup", False):
+            return event
+        if not self._whatsapp_observe_untriggered_group_messages():
+            return event
+        chat_id = str(raw_message.get("chatId") or "")
+        allowed = self._whatsapp_observe_allowed_chats()
+        if not allowed or chat_id not in allowed:
+            return event
+
+        shared_source = self._whatsapp_group_observe_shared_source(event.source)
+        observe_prompt = self._whatsapp_group_observe_channel_prompt()
+        channel_prompt = f"{event.channel_prompt}\n\n{observe_prompt}" if event.channel_prompt else observe_prompt
+        if event.message_type == MessageType.COMMAND:
+            return dataclasses.replace(event, source=shared_source, channel_prompt=channel_prompt)
+        return dataclasses.replace(
+            event,
+            text=self._whatsapp_group_observe_attributed_text(event),
+            source=shared_source,
+            channel_prompt=channel_prompt,
+        )
+
+    def _observe_untriggered_group_message(self, event: MessageEvent) -> None:
+        """Append skipped WhatsApp group chatter without dispatching the agent."""
+        store = getattr(self, "_session_store", None)
+        if not store:
+            return
+        try:
+            shared_source = self._whatsapp_group_observe_shared_source(event.source)
+            session_entry = store.get_or_create_session(shared_source)
+            entry = {
+                "role": "user",
+                "content": self._whatsapp_group_observe_attributed_text(event),
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "observed": True,
+            }
+            if event.message_id:
+                entry["message_id"] = str(event.message_id)
+            store.append_to_transcript(session_entry.session_id, entry)
+            try:
+                store.update_session(session_entry.session_key)
+            except Exception:
+                pass
+            logger.info(
+                "[%s] WhatsApp group message observed (no bot trigger): chat=%s from=%s",
+                self.name,
+                event.source.chat_id,
+                event.source.user_id or "unknown",
+            )
+        except Exception as exc:
+            logger.warning("[%s] Failed to observe WhatsApp group message: %s", self.name, exc)
     
     async def connect(self) -> bool:
         """
@@ -1161,8 +1371,13 @@ class WhatsAppAdapter(BasePlatformAdapter):
                         messages = await resp.json()
                         for msg_data in messages:
                             event = await self._build_message_event(msg_data)
-                            if event:
+                            if not event:
+                                continue
+                            if self._should_process_message(msg_data):
+                                event = self._apply_whatsapp_group_observe_attribution(event)
                                 await self.handle_message(event)
+                            elif self._should_observe_untriggered_group_message(msg_data):
+                                self._observe_untriggered_group_message(event)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1178,7 +1393,12 @@ class WhatsAppAdapter(BasePlatformAdapter):
     async def _build_message_event(self, data: Dict[str, Any]) -> Optional[MessageEvent]:
         """Build a MessageEvent from bridge message data, downloading images to cache."""
         try:
-            if not self._should_process_message(data):
+            if not self._should_accept_message(data):
+                return None
+            if (
+                not self._should_process_message(data)
+                and not self._should_observe_untriggered_group_message(data)
+            ):
                 return None
 
             # Determine message type
@@ -1309,7 +1529,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # the message text so the agent can read it inline.
             # Cap at 100KB to match Telegram/Discord/Slack behaviour.
             body = data.get("body", "")
-            if data.get("isGroup"):
+            if data.get("isGroup") and self._should_process_message(data):
                 body = self._clean_bot_mention_text(body, data)
             reply_to_text = data.get("quotedText")
             if isinstance(reply_to_text, str):

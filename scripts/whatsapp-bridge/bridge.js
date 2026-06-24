@@ -172,13 +172,37 @@ function firstNonEmptyText(...values) {
   return '';
 }
 
+function appendDistinctText(base, ...values) {
+  const parts = [];
+  const seen = new Set();
+
+  for (const value of [base, ...values]) {
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    if (parts.some(part => part.includes(trimmed))) continue;
+    if (seen.has(trimmed)) continue;
+    parts.push(trimmed);
+    seen.add(trimmed);
+  }
+
+  return parts.join('\n');
+}
+
+function extractExtendedTextMessageText(message) {
+  if (!message || typeof message !== 'object') return '';
+  return appendDistinctText(
+    message.text,
+    message.matchedText,
+    message.canonicalUrl,
+  );
+}
+
 function extractQuotedText(quotedMessage) {
   const quotedContent = unwrapMessageContent(quotedMessage || {});
   const text = firstNonEmptyText(
     quotedContent.conversation,
-    quotedContent.extendedTextMessage?.text,
-    quotedContent.extendedTextMessage?.matchedText,
-    quotedContent.extendedTextMessage?.canonicalUrl,
+    extractExtendedTextMessageText(quotedContent.extendedTextMessage),
     quotedContent.imageMessage?.caption,
     quotedContent.videoMessage?.caption,
     quotedContent.documentMessage?.caption,
@@ -487,8 +511,8 @@ async function startSocket() {
 
       if (messageContent.conversation) {
         body = messageContent.conversation;
-      } else if (messageContent.extendedTextMessage?.text) {
-        body = messageContent.extendedTextMessage.text;
+      } else if (messageContent.extendedTextMessage) {
+        body = extractExtendedTextMessageText(messageContent.extendedTextMessage);
       } else if (messageContent.imageMessage) {
         body = messageContent.imageMessage.caption || '';
         hasMedia = true;

@@ -38,34 +38,7 @@ def test_register_wires_tool_and_aux_task():
     assert "video_path" in props
     assert "transcription_language" in props
     assert tool["schema"]["parameters"]["required"] == []
-    assert [hook[0] for hook in calls["hooks"]] == ["pre_gateway_dispatch", "pre_tool_call"]
-
-
-def test_pre_gateway_dispatch_skips_bare_video_url():
-    from gateway.platforms.base import MessageEvent, MessageType
-    from plugins.video_analysis.tools import maybe_skip_implicit_video_gateway_event
-
-    event = MessageEvent(
-        text="https://youtube.com/watch?v=abc12345678",
-        message_type=MessageType.TEXT,
-    )
-
-    result = maybe_skip_implicit_video_gateway_event(event=event)
-
-    assert result is not None
-    assert result["action"] == "skip"
-
-
-def test_pre_gateway_dispatch_allows_explicit_video_request():
-    from gateway.platforms.base import MessageEvent, MessageType
-    from plugins.video_analysis.tools import maybe_skip_implicit_video_gateway_event
-
-    event = MessageEvent(
-        text="summarize this https://youtube.com/watch?v=abc12345678",
-        message_type=MessageType.TEXT,
-    )
-
-    assert maybe_skip_implicit_video_gateway_event(event=event) is None
+    assert [hook[0] for hook in calls["hooks"]] == ["pre_tool_call"]
 
 
 def test_pre_tool_call_blocks_bare_gateway_video_url():
@@ -95,6 +68,44 @@ def test_pre_tool_call_allows_explicit_gateway_video_request():
     tokens = set_session_vars(
         platform="whatsapp",
         current_user_message="can you analyze what this video says? https://youtu.be/abc12345678",
+    )
+    try:
+        result = maybe_block_implicit_video_tool_call(
+            tool_name="video_download_analyze",
+            args={"url": "https://youtu.be/abc12345678"},
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result is None
+
+
+def test_pre_tool_call_allows_later_reference_without_current_url():
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
+
+    tokens = set_session_vars(
+        platform="whatsapp",
+        current_user_message="do that one from before",
+    )
+    try:
+        result = maybe_block_implicit_video_tool_call(
+            tool_name="video_download_analyze",
+            args={"url": "https://youtu.be/abc12345678"},
+        )
+    finally:
+        clear_session_vars(tokens)
+
+    assert result is None
+
+
+def test_pre_tool_call_allows_natural_explicit_video_request():
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from plugins.video_analysis.tools import maybe_block_implicit_video_tool_call
+
+    tokens = set_session_vars(
+        platform="whatsapp",
+        current_user_message="what's this? https://youtu.be/abc12345678",
     )
     try:
         result = maybe_block_implicit_video_tool_call(

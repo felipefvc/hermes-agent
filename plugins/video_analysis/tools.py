@@ -83,9 +83,11 @@ _VIDEO_REQUEST_RE = re.compile(
     r"describe|descri(?:be|ba|ver|ção|cao)|"
     r"inspect|watch|assist(?:a|ir)|veja|look\s+at|"
     r"explain|explic(?:a|ar|que)|break\s*down|"
+    r"tell\s+me\s+about|thoughts?\s+on|comment(?:a|e|ar)?|"
     r"extract|quote|chapter|"
-    r"what\s+(?:does|is|are)|what\s+do\s+you\s+think|"
-    r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)"
+    r"what(?:'s|\s+(?:does|is|are))|what\s+do\s+you\s+think|"
+    r"o\s+que|que\s+.*(?:fala|diz|mostra|significa)|"
+    r"fala\s+sobre|diga\s+sobre|opini(?:ão|ao)"
     r")\b"
 )
 
@@ -246,35 +248,12 @@ def text_contains_supported_video_url(text: str) -> bool:
     return False
 
 
-def _event_has_video_attachment(event: Any) -> bool:
-    message_type = getattr(getattr(event, "message_type", None), "value", "")
-    if message_type == "video":
-        return True
-    media_types = getattr(event, "media_types", None) or []
-    return any(str(media_type).lower().startswith("video/") for media_type in media_types)
-
-
-def maybe_skip_implicit_video_gateway_event(event: Any = None, **_: Any) -> Optional[Dict[str, Any]]:
-    """Drop bare video shares before they start an agent turn."""
-    if event is None:
-        return None
-    text = str(getattr(event, "text", "") or "")
-    if message_explicitly_requests_video_analysis(text):
-        return None
-    if not _event_has_video_attachment(event) and not text_contains_supported_video_url(text):
-        return None
-    return {
-        "action": "skip",
-        "reason": "video shared without an explicit analysis or summary request",
-    }
-
-
 def maybe_block_implicit_video_tool_call(
     tool_name: str = "",
     args: Any = None,
     **_: Any,
 ) -> Optional[Dict[str, str]]:
-    """Refuse video analysis when a gateway user only shared media."""
+    """Refuse analysis for a bare video URL in the current gateway turn."""
     if tool_name != VIDEO_ANALYSIS_TOOL_NAME or not isinstance(args, dict):
         return None
     if not (args.get("url") or args.get("video_path")):
@@ -287,6 +266,8 @@ def maybe_block_implicit_video_tool_call(
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
     current_message = get_session_env("HERMES_CURRENT_USER_MESSAGE", "")
     if not platform or not current_message:
+        return None
+    if not text_contains_supported_video_url(current_message):
         return None
     if message_explicitly_requests_video_analysis(current_message):
         return None

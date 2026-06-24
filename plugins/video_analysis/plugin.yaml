@@ -6,5 +6,4 @@ kind: standalone
 provides_tools:
   - video_download_analyze
 provides_hooks:
-  - pre_gateway_dispatch
   - pre_tool_call

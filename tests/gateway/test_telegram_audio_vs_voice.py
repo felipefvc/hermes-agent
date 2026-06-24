@@ -189,8 +189,8 @@ async def test_audio_attachment_skips_stt_when_stt_disabled():
 
 
 @pytest.mark.asyncio
-async def test_video_attachment_adds_video_analysis_path_note():
-    """Video attachments should expose a local path for video_download_analyze."""
+async def test_video_attachment_does_not_auto_request_analysis():
+    """Video attachments should expose a path without treating the upload as a request."""
     runner = _make_runner(stt_enabled=True)
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="1", chat_type="dm")
     event = _video_event("/tmp/video_abcd1234_clip.mp4")
@@ -207,14 +207,14 @@ async def test_video_attachment_adds_video_analysis_path_note():
 
     assert result is not None
     assert "video attachment" in result.lower()
-    assert "video_download_analyze" in result
-    assert "video_path" in result
+    assert "do not analyze" in result.lower()
+    assert "only call video_download_analyze" in result.lower()
     assert "/tmp/video_abcd1234_clip.mp4" in result
 
 
 @pytest.mark.asyncio
-async def test_text_reply_with_quoted_video_adds_video_analysis_path_note():
-    """Quoted WhatsApp video media should work even when the trigger is text."""
+async def test_text_reply_with_quoted_video_keeps_explicit_request_guard():
+    """Quoted WhatsApp video media should carry the path and explicit-request guard."""
     runner = _make_runner(stt_enabled=True)
     source = SessionSource(platform=Platform.WHATSAPP, chat_id="1", chat_type="group")
     event = _text_reply_with_video_event("/tmp/vid_quoted.mp4")
@@ -231,7 +231,8 @@ async def test_text_reply_with_quoted_video_adds_video_analysis_path_note():
 
     assert result is not None
     assert "video attachment" in result.lower()
-    assert "video_download_analyze" in result
+    assert "do not analyze" in result.lower()
+    assert "only call video_download_analyze" in result.lower()
     assert "/root/.hermes/cache/videos/vid_quoted.mp4" in result
     assert "Comrad o que e isso?" in result
 

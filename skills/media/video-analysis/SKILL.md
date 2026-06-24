@@ -1,6 +1,6 @@
 ---
 name: video-analysis
-description: "Download social videos or inspect cached video attachments, transcribe audio, sample frames, and summarize with Hermes vision/LLM."
+description: "Explicitly requested social-video or cached-attachment analysis with transcription, sampled frames, and summaries."
 version: 1.0.0
 author: Hermes Agent
 license: MIT
@@ -14,7 +14,7 @@ metadata:
 
 # Video Analysis
 
-Use when the user shares a video URL or direct video attachment and asks what it says, shows, claims, summarizes, or implies. URLs are handled through yt-dlp for YouTube, Facebook, Instagram, X/Twitter, and other supported sites. Local attachment paths, such as cached WhatsApp videos, are handled directly.
+Use only when the user explicitly asks what a video URL or direct video attachment says, shows, claims, summarizes, or implies. A bare video URL or attachment is not enough; do not download, inspect, transcribe, or summarize videos just because they were shared. URLs are handled through yt-dlp for YouTube, Facebook, Instagram, X/Twitter, and other supported sites. Local attachment paths, such as cached WhatsApp videos, are handled directly.
 
 ## Tool
 

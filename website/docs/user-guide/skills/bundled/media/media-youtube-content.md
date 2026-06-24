@@ -1,14 +1,14 @@
 ---
-title: "Youtube Content — YouTube transcripts to summaries, threads, blogs"
+title: "Youtube Content — Explicitly requested YouTube transcripts, summaries, threads, and blogs"
 sidebar_label: "Youtube Content"
-description: "YouTube transcripts to summaries, threads, blogs"
+description: "Explicitly requested YouTube transcripts, summaries, threads, and blogs"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Youtube Content
 
-YouTube transcripts to summaries, threads, blogs.
+Explicitly requested YouTube transcripts, summaries, threads, and blogs.
 
 ## Skill metadata
 
@@ -28,7 +28,7 @@ The following is the complete skill definition that Hermes loads when this skill
 
 ## When to use
 
-Use when the user shares a YouTube URL or video link, asks to summarize a video, requests a transcript, or wants to extract and reformat content from any YouTube video. Transforms transcripts into structured content (chapters, summaries, threads, blog posts).
+Use only when the user explicitly asks to summarize, transcribe, extract, chapter, quote, or reformat a YouTube video. A bare YouTube URL or video link is not enough; do not fetch transcripts or summarize just because a link was shared.
 
 Extract transcripts from YouTube videos and convert them into useful formats.
 
@@ -82,7 +82,7 @@ After fetching the transcript, format it based on what the user asks for:
 1. **Fetch** the transcript using the helper script with `--text-only --timestamps`.
 2. **Validate**: confirm the output is non-empty and in the expected language. If empty, retry without `--language` to get any available transcript. If still empty, tell the user the video likely has transcripts disabled.
 3. **Chunk if needed**: if the transcript exceeds ~50K characters, split into overlapping chunks (~40K with 2K overlap) and summarize each chunk before merging.
-4. **Transform** into the requested output format. If the user did not specify a format, default to a summary.
+4. **Transform** into the requested output format. If the user explicitly asked to process the video but did not specify a format, default to a summary.
 5. **Verify**: re-read the transformed output to check for coherence, correct timestamps, and completeness before presenting.
 
 ## Error Handling

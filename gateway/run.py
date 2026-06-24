@@ -8370,8 +8370,10 @@ class GatewayRunner:
                 _note = (
                     f"[The user sent a video attachment: '{_display}'. "
                     f"It is saved at: {_agent_path}. "
-                    f"To analyze it, call video_download_analyze with video_path set to this path "
-                    f"and source_label set to 'video attachment'.]"
+                    f"Do not analyze, summarize, describe, or transcribe the video automatically. "
+                    f"Only call video_download_analyze with this path if the user's message "
+                    f"explicitly asks you to analyze, summarize, describe, inspect, transcribe, "
+                    f"or answer questions about the video.]"
                 )
                 message_text = f"{_note}\n\n{message_text}"
 

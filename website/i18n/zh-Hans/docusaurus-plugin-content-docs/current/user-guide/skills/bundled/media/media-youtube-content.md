@@ -1,14 +1,14 @@
 ---
-title: "Youtube Content — YouTube 视频转文字摘要、推文、博客"
+title: "Youtube Content — 明确请求时的 YouTube 文字稿、摘要、推文和博客"
 sidebar_label: "Youtube Content"
-description: "YouTube 视频转文字摘要、推文、博客"
+description: "明确请求时的 YouTube 文字稿、摘要、推文和博客"
 ---
 
 {/* This page is auto-generated from the skill's SKILL.md by website/scripts/generate-skill-docs.py. Edit the source SKILL.md, not this page. */}
 
 # Youtube Content
 
-YouTube 视频转文字摘要、推文、博客。
+明确请求时的 YouTube 文字稿、摘要、推文和博客。
 
 ## Skill 元数据
 
@@ -28,7 +28,7 @@ YouTube 视频转文字摘要、推文、博客。
 
 ## 使用时机
 
-当用户分享 YouTube URL 或视频链接、要求总结视频、请求获取文字稿，或希望提取并重新格式化任意 YouTube 视频内容时使用。可将文字稿转换为结构化内容（章节、摘要、推文线程、博客文章）。
+仅当用户明确要求总结、转写、提取、分章节、引用或重新格式化 YouTube 视频时使用。仅分享 YouTube URL 或视频链接本身并不足以触发；不要因为用户分享了链接就获取文字稿或总结。
 
 从 YouTube 视频中提取文字稿并将其转换为实用格式。
 
@@ -82,7 +82,7 @@ python3 SKILL_DIR/scripts/fetch_transcript.py "URL" --language tr,en
 1. **获取**：使用辅助脚本并加上 `--text-only --timestamps` 参数获取文字稿。
 2. **验证**：确认输出非空且语言符合预期。若为空，去掉 `--language` 参数重试以获取任意可用文字稿。若仍为空，告知用户该视频可能已禁用文字稿。
 3. **分块（如需）**：若文字稿超过约 50K 字符，将其拆分为有重叠的块（约 40K，重叠 2K），逐块摘要后再合并。
-4. **转换**：将内容转换为用户请求的输出格式。若用户未指定格式，默认输出摘要。
+4. **转换**：将内容转换为用户请求的输出格式。若用户明确要求处理视频但未指定格式，默认输出摘要。
 5. **校验**：重新阅读转换后的输出，在呈现前检查连贯性、时间戳准确性及完整性。
 
 ## 错误处理

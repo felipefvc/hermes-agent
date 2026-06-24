@@ -11,6 +11,7 @@ def _event(
     *,
     chat_type: str = "group",
     raw_message: dict | None = None,
+    metadata: dict | None = None,
 ) -> MessageEvent:
     return MessageEvent(
         text=text,
@@ -22,6 +23,7 @@ def _event(
             user_name="User",
         ),
         raw_message=raw_message or {},
+        metadata=metadata or {},
     )
 
 
@@ -71,6 +73,20 @@ def test_alias_mention_triggers_profile():
 
     assert decision.action == "allow"
     assert decision.reason == "mention"
+
+
+def test_platform_structural_mention_survives_cleaned_text():
+    event = _event(
+        "please summarize this",
+        metadata={
+            "platform_structural_trigger": {
+                "platform": "whatsapp",
+                "reason": "mention_name",
+            }
+        },
+    )
+
+    assert should_trigger(decision_profile(_config()), event) == (True, "mention_name")
 
 
 def test_reply_to_bot_triggers_profile():

@@ -162,6 +162,24 @@ def _alias_mentioned(text: str, aliases: Any) -> bool:
     return False
 
 
+def _platform_structural_trigger(event: Any) -> str:
+    metadata = getattr(event, "metadata", None)
+    if not isinstance(metadata, dict):
+        return ""
+    value = metadata.get("platform_structural_trigger")
+    if not isinstance(value, dict):
+        return ""
+    reason = str(value.get("reason") or "").strip().lower()
+    if not reason:
+        return ""
+    source = getattr(event, "source", None)
+    event_platform = _platform_value(getattr(source, "platform", ""))
+    trigger_platform = str(value.get("platform") or "").strip().lower()
+    if trigger_platform and event_platform and trigger_platform != event_platform:
+        return ""
+    return reason
+
+
 def should_trigger(profile: dict[str, Any], event: Any) -> tuple[bool, str]:
     source = getattr(event, "source", None)
     chat_type = _source_field(source, "chat_type").lower()
@@ -175,6 +193,11 @@ def should_trigger(profile: dict[str, Any], event: Any) -> tuple[bool, str]:
         return True, "free_response"
     if bool(triggers.get("reply_to_bot", True)) and _reply_to_bot(event):
         return True, "reply_to_bot"
+    structural_trigger = _platform_structural_trigger(event)
+    if structural_trigger == "reply_to_bot" and bool(triggers.get("reply_to_bot", True)):
+        return True, "reply_to_bot"
+    if structural_trigger in {"bot_mention", "mention_name", "mention_pattern", "slash_command"}:
+        return True, structural_trigger
     if _mentioned_bot(event) or _alias_mentioned(text, triggers.get("mention_aliases")):
         return True, "mention"
     if bool(triggers.get("links", False)) and _LINK_RE.search(text):

@@ -254,6 +254,11 @@ async def test_triggered_whatsapp_group_message_uses_shared_observed_context():
 
     event = await adapter._build_message_event(_group_message("Comrad, resuma o vídeo anterior"))
     assert event is not None
+    assert event.text == "resuma o vídeo anterior"
+    assert event.metadata["platform_structural_trigger"] == {
+        "platform": "whatsapp",
+        "reason": "mention_name",
+    }
 
     attributed = adapter._apply_whatsapp_group_observe_attribution(event)
 

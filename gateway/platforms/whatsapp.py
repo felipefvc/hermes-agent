@@ -591,22 +591,34 @@ class WhatsAppAdapter(BasePlatformAdapter):
         # DMs that pass the policy gate are always processed.
         if not is_group:
             return True
+
+        return bool(self._whatsapp_group_trigger_reason(data))
+
+    def _whatsapp_group_trigger_reason(self, data: Dict[str, Any]) -> str:
+        """Return why an allowed WhatsApp group message should dispatch."""
+        if not data.get("isGroup", False):
+            return ""
+        if not self._should_accept_message(data):
+            return ""
+
         # Group messages: check mention / free-response settings
         chat_id = str(data.get("chatId") or "")
         if chat_id in self._whatsapp_free_response_chats():
-            return True
+            return "free_response"
         if not self._whatsapp_require_mention():
-            return True
+            return "group_open"
         body = str(data.get("body") or "").strip()
         if body.startswith("/"):
-            return True
+            return "slash_command"
         if self._message_is_reply_to_bot(data):
-            return True
+            return "reply_to_bot"
         if self._message_mentions_bot(data):
-            return True
+            return "bot_mention"
         if self._message_mentions_name(data):
-            return True
-        return self._message_matches_mention_patterns(data)
+            return "mention_name"
+        if self._message_matches_mention_patterns(data):
+            return "mention_pattern"
+        return ""
 
     def _should_observe_untriggered_group_message(self, data: Dict[str, Any]) -> bool:
         if not self._whatsapp_observe_untriggered_group_messages():
@@ -1529,7 +1541,14 @@ class WhatsAppAdapter(BasePlatformAdapter):
             # the message text so the agent can read it inline.
             # Cap at 100KB to match Telegram/Discord/Slack behaviour.
             body = data.get("body", "")
-            if data.get("isGroup") and self._should_process_message(data):
+            whatsapp_trigger = self._whatsapp_group_trigger_reason(data)
+            metadata: Dict[str, Any] = {}
+            if whatsapp_trigger:
+                metadata["platform_structural_trigger"] = {
+                    "platform": "whatsapp",
+                    "reason": whatsapp_trigger,
+                }
+            if data.get("isGroup") and whatsapp_trigger:
                 body = self._clean_bot_mention_text(body, data)
             reply_to_text = data.get("quotedText")
             if isinstance(reply_to_text, str):
@@ -1579,6 +1598,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 media_types=media_types,
                 reply_to_message_id=reply_to_message_id,
                 reply_to_text=reply_to_text,
+                metadata=metadata,
             )
         except Exception as e:
             print(f"[{self.name}] Error building event: {e}")

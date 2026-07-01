@@ -8,6 +8,7 @@ and implement the required methods.
 import asyncio
 import inspect
 import ipaddress
+import json
 import logging
 import os
 import random
@@ -967,6 +968,7 @@ MEDIA_DELIVERY_TRUST_RECENT_SECONDS_ENV = "HERMES_MEDIA_TRUST_RECENT_SECONDS"
 # injection from one user could exfiltrate the host's secrets to that same
 # user should set this to true.
 MEDIA_DELIVERY_STRICT_ENV = "HERMES_MEDIA_DELIVERY_STRICT"
+_DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 MEDIA_DELIVERY_SAFE_ROOTS = (
     IMAGE_CACHE_DIR,
     AUDIO_CACHE_DIR,
@@ -1122,6 +1124,63 @@ def _path_is_within(path: Path, root: Path) -> bool:
         return False
 
 
+def _media_delivery_docker_path_candidates(candidate: str) -> list[Path]:
+    """Return host-side path candidates for known Docker container paths."""
+    if os.environ.get("TERMINAL_ENV", "").strip().lower() != "docker":
+        return []
+    if not candidate.startswith("/"):
+        return []
+
+    candidates: list[Path] = []
+
+    raw_volumes = os.environ.get("TERMINAL_DOCKER_VOLUMES", "").strip()
+    if raw_volumes:
+        try:
+            volumes = json.loads(raw_volumes)
+        except Exception:
+            volumes = []
+        if isinstance(volumes, list):
+            for spec in volumes:
+                if not isinstance(spec, str):
+                    continue
+                match = _DOCKER_VOLUME_SPEC_RE.match(spec.strip())
+                if not match:
+                    continue
+                host_root = Path(os.path.expanduser(match.group("host")))
+                container_root = match.group("container").rstrip("/")
+                if candidate == container_root or candidate.startswith(container_root + "/"):
+                    rel = candidate[len(container_root):].lstrip("/")
+                    candidates.append(host_root / rel)
+
+    sandbox_root = Path(
+        os.path.expanduser(
+            os.environ.get("TERMINAL_SANDBOX_DIR")
+            or str(_HERMES_HOME / "sandboxes")
+        )
+    )
+    default_docker_root = sandbox_root / "docker" / "default"
+    if candidate == "/workspace" or candidate.startswith("/workspace/"):
+        rel = candidate[len("/workspace"):].lstrip("/")
+        candidates.append(default_docker_root / "workspace" / rel)
+
+    return candidates
+
+
+def _resolve_media_delivery_path(candidate: str) -> Optional[Path]:
+    expanded = Path(os.path.expanduser(candidate))
+    if not expanded.is_absolute():
+        return None
+
+    for path_candidate in [expanded, *_media_delivery_docker_path_candidates(str(expanded))]:
+        try:
+            resolved = path_candidate.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if resolved.is_file():
+            return resolved
+    return None
+
+
 def validate_media_delivery_path(path: str) -> Optional[str]:
     """Return a safe absolute file path for native media delivery, else None.
 
@@ -1152,16 +1211,8 @@ def validate_media_delivery_path(path: str) -> Optional[str]:
     if not candidate:
         return None
 
-    expanded = Path(os.path.expanduser(candidate))
-    if not expanded.is_absolute():
-        return None
-
-    try:
-        resolved = expanded.resolve(strict=True)
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-    if not resolved.is_file():
+    resolved = _resolve_media_delivery_path(candidate)
+    if resolved is None:
         return None
 
     # Cache / operator allowlist is always honored — these are unconditionally

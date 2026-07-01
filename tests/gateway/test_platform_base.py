@@ -1,5 +1,6 @@
 """Tests for gateway/platforms/base.py — MessageEvent, media extraction, message truncation."""
 
+import json
 import os
 import time
 from unittest.mock import patch
@@ -677,11 +678,48 @@ class TestMediaDeliveryDefaultMode:
         self._patch_roots(monkeypatch)
 
         notes = tmp_path / "notes.md"
-        notes.write_text("# old\n")
-        os.utime(notes, (time.time() - 86400, time.time() - 86400))
+        notes.write_text("# Old notes\n")
+        old_mtime = time.time() - 7200
+        os.utime(notes, (old_mtime, old_mtime))
 
         out = BasePlatformAdapter.filter_local_delivery_paths([str(notes)])
         assert out == [str(notes.resolve())]
+
+    def test_translates_docker_workspace_media_path(self, tmp_path, monkeypatch):
+        self._patch_roots(monkeypatch)
+        sandbox_root = tmp_path / "sandboxes"
+        host_file = sandbox_root / "docker" / "default" / "workspace" / "clip.gif"
+        host_file.parent.mkdir(parents=True)
+        host_file.write_bytes(b"GIF89a")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(sandbox_root))
+
+        assert BasePlatformAdapter.validate_media_delivery_path("/workspace/clip.gif") == str(host_file.resolve())
+
+    def test_does_not_translate_workspace_when_not_docker(self, tmp_path, monkeypatch):
+        self._patch_roots(monkeypatch)
+        sandbox_root = tmp_path / "sandboxes"
+        host_file = sandbox_root / "docker" / "default" / "workspace" / "clip.gif"
+        host_file.parent.mkdir(parents=True)
+        host_file.write_bytes(b"GIF89a")
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        monkeypatch.setenv("TERMINAL_SANDBOX_DIR", str(sandbox_root))
+
+        assert BasePlatformAdapter.validate_media_delivery_path("/workspace/clip.gif") is None
+
+    def test_translates_configured_docker_output_volume(self, tmp_path, monkeypatch):
+        self._patch_roots(monkeypatch)
+        output_root = tmp_path / "media-output"
+        host_file = output_root / "clip.gif"
+        host_file.parent.mkdir(parents=True)
+        host_file.write_bytes(b"GIF89a")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv(
+            "TERMINAL_DOCKER_VOLUMES",
+            json.dumps([f"{output_root}:/output"]),
+        )
+
+        assert BasePlatformAdapter.validate_media_delivery_path("/output/clip.gif") == str(host_file.resolve())
 
 
 # ---------------------------------------------------------------------------

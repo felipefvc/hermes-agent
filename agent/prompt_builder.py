@@ -810,6 +810,14 @@ def build_environment_hints() -> str:
                 f"them, probe directly with a terminal call like "
                 f"`uname -a && whoami && pwd`."
             )
+        if backend == "docker":
+            hints.append(
+                "Docker media delivery: files in `/tmp` exist only inside the "
+                "container and cannot be uploaded by the messaging gateway. "
+                "For files you intend to send with `MEDIA:`, write them under "
+                "`/workspace/...` and emit that `/workspace/...` path, or use "
+                "a configured `/output/...` or `/outputs/...` Docker volume."
+            )
 
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)

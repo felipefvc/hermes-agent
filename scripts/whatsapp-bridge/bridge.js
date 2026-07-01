@@ -789,7 +789,37 @@ app.post('/send-media', async (req, res) => {
 
     switch (type) {
       case 'image':
-        msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+        if (ext === 'gif') {
+          let videoBuffer = buffer;
+          let tmpPath = null;
+          try {
+            tmpPath = path.join(tmpdir(), `hermes_gif_${randomBytes(6).toString('hex')}.mp4`);
+            execSync(
+              `ffmpeg -y -i ${JSON.stringify(filePath)} -movflags +faststart -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" ${JSON.stringify(tmpPath)}`,
+              { timeout: 60000, stdio: 'pipe' }
+            );
+            videoBuffer = readFileSync(tmpPath);
+          } catch (convErr) {
+            console.warn('[bridge] gif-to-mp4 conversion failed, sending GIF as document:', convErr.message);
+            msgPayload = {
+              document: buffer,
+              fileName: fileName || path.basename(filePath),
+              caption: caption || undefined,
+              mimetype: 'image/gif',
+            };
+            break;
+          } finally {
+            try { if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_) {}
+          }
+          msgPayload = {
+            video: videoBuffer,
+            caption: caption || undefined,
+            mimetype: 'video/mp4',
+            gifPlayback: true,
+          };
+        } else {
+          msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+        }
         break;
       case 'video':
         msgPayload = { video: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
